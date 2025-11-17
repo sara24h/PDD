@@ -92,13 +92,16 @@ class PDDTrainer:
         """Initialize differentiable masks for each conv layer"""
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # Initialize mask with random values near 0
+                # Initialize mask with values that will result in ~50% pruning
+                # Values around 0 will be around 0.5 after ApproxSign
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.1,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.5,
                     requires_grad=True
                 )
                 self.masks[name] = mask
                 self.mask_params.append(mask)
+                
+        print(f"Initialized {len(self.masks)} learnable masks")
     
     def _wrap_conv_layers(self):
         """Wrap conv layers with masked versions"""
