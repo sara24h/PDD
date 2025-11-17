@@ -5,7 +5,6 @@ import os
 from utils.data_loader import get_cifar10_dataloaders
 from models.resnet import resnet20, resnet56
 from utils.trainer import PDDTrainer
-from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint, load_checkpoint
 
 
