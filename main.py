@@ -49,6 +49,26 @@ def parse_args():
     return parser.parse_args()
 
 
+def convert_state_dict_keys(state_dict):
+    """Convert checkpoint keys to match model architecture"""
+    new_state_dict = {}
+    
+    for key, value in state_dict.items():
+        new_key = key
+        
+        # Convert fc to linear
+        if 'fc.' in key:
+            new_key = key.replace('fc.', 'linear.')
+        
+        # Convert downsample to shortcut
+        elif 'downsample.' in key:
+            new_key = key.replace('downsample.', 'shortcut.')
+        
+        new_state_dict[new_key] = value
+    
+    return new_state_dict
+
+
 def download_teacher_checkpoint(checkpoint_path):
     """Download teacher checkpoint from GitHub if not exists"""
     if not os.path.exists(checkpoint_path):
@@ -101,12 +121,18 @@ def main():
     # Download teacher checkpoint if needed
     download_teacher_checkpoint(args.teacher_checkpoint)
     
-    # Load teacher weights
+    # Load teacher weights with key conversion
     checkpoint = torch.load(args.teacher_checkpoint, map_location=device)
     if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-        teacher.load_state_dict(checkpoint['state_dict'])
+        state_dict = checkpoint['state_dict']
     else:
-        teacher.load_state_dict(checkpoint)
+        state_dict = checkpoint
+    
+    # Convert keys to match model architecture
+    state_dict = convert_state_dict_keys(state_dict)
+    
+    # Load with strict=False to handle any remaining mismatches
+    teacher.load_state_dict(state_dict, strict=False)
     
     teacher = teacher.to(device)
     teacher.eval()
