@@ -6,8 +6,8 @@ from thop import profile
 
 def create_pruned_resnet20(original_model, masks):
     """
-    Create a pruned ResNet20 ensuring conv2 and shortcut have IDENTICAL output channels.
-    This is critical because: out = conv2(x) + shortcut(x)
+    Create a pruned ResNet20 with proper channel handling.
+    CRITICAL: For blocks without shortcut conv (identity), output must equal input channels.
     """
     pruned_model = resnet20(num_classes=10)
     orig_modules = dict(original_model.named_modules())
@@ -57,22 +57,28 @@ def create_pruned_resnet20(original_model, masks):
             else:
                 in_channels_idx = channel_map[f'{layer_name}.{block_idx-1}.out']
             
-            # Determine block output channels
+            # Check if block has shortcut conv
             conv2_name = f"{prefix}.conv2"
             shortcut_name = f"{prefix}.shortcut.0"
             has_shortcut = shortcut_name in orig_modules
             
-            # CRITICAL: Use conv2 mask to determine output channels
-            if conv2_name in masks:
-                out_channels_idx = (masks[conv2_name].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
-                if len(out_channels_idx) == 0:
-                    out_channels_idx = torch.tensor([0])
-                print(f"  {prefix}: {orig_modules[conv2_name].out_channels} -> {len(out_channels_idx)} channels (masked)")
+            # Determine output channels
+            if has_shortcut:
+                # Block has conv shortcut - can use mask freely
+                if conv2_name in masks:
+                    out_channels_idx = (masks[conv2_name].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
+                    if len(out_channels_idx) == 0:
+                        out_channels_idx = torch.tensor([0])
+                    print(f"  {prefix}: {orig_modules[conv2_name].out_channels} -> {len(out_channels_idx)} channels (masked, has shortcut)")
+                else:
+                    out_channels_idx = torch.arange(orig_modules[conv2_name].out_channels)
+                    print(f"  {prefix}: keeping all {len(out_channels_idx)} channels (no mask, has shortcut)")
             else:
-                out_channels_idx = torch.arange(orig_modules[conv2_name].out_channels)
-                print(f"  {prefix}: keeping all {len(out_channels_idx)} channels (no mask)")
+                # Block has identity shortcut - output MUST match input!
+                print(f"  {prefix}: identity shortcut detected, output must match input ({len(in_channels_idx)} channels)")
+                out_channels_idx = in_channels_idx
             
-            # Save output channels for next block
+            # Save output channels
             channel_map[f'{prefix}.out'] = out_channels_idx
             
             # --- Process conv1 ---
@@ -117,13 +123,13 @@ def create_pruned_resnet20(original_model, masks):
             new_modules[bn2_name].running_var = orig_modules[bn2_name].running_var[out_channels_idx].clone()
             new_modules[bn2_name].num_features = len(out_channels_idx)
             
-            # --- Process shortcut (MUST use same out_channels_idx as conv2!) ---
+            # --- Process shortcut conv (if exists) ---
             if has_shortcut:
                 sc_bn_name = f"{prefix}.shortcut.1"
                 
                 print(f"    Pruning shortcut: in={len(in_channels_idx)}, out={len(out_channels_idx)}")
                 
-                # Prune shortcut conv: [out_channels, in_channels, k, k]
+                # Prune shortcut conv
                 orig_w_sc = orig_modules[shortcut_name].weight.data
                 new_w_sc = orig_w_sc[out_channels_idx][:, in_channels_idx, :, :]
                 new_modules[shortcut_name].weight = nn.Parameter(new_w_sc.clone())
