@@ -2,18 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-import numpy as np
 
 
 class ApproxSign(torch.autograd.Function):
-    """
-    Differentiable approximation of sign function
-    Using piecewise polynomial function from the paper
-    """
     @staticmethod
     def forward(ctx, x):
         ctx.save_for_backward(x)
-        # Binarize the mask using piecewise function
         output = torch.zeros_like(x)
         output[x < -1] = 0
         mask1 = (x >= -1) & (x < 0)
@@ -27,36 +21,15 @@ class ApproxSign(torch.autograd.Function):
     def backward(ctx, grad_output):
         x, = ctx.saved_tensors
         grad_input = grad_output.clone()
-        
-        # Triangle-shaped derivative
         grad_mask = torch.zeros_like(x)
         mask1 = (x >= -1) & (x < 0)
         grad_mask[mask1] = x[mask1] + 1
         mask2 = (x >= 0) & (x < 1)
         grad_mask[mask2] = 1 - x[mask2]
-        
         return grad_input * grad_mask
 
 
-class MaskedConv2d(nn.Module):
-    """Wrapper for Conv2d with learnable mask"""
-    def __init__(self, conv_layer, mask):
-        super().__init__()
-        self.conv = conv_layer
-        self.mask = mask
-    
-    def forward(self, x):
-        # Apply convolution
-        out = self.conv(x)
-        # Apply binary mask
-        binary_mask = ApproxSign.apply(self.mask)
-        return out * binary_mask
-
-
 class PDDTrainer:
-    """
-    Trainer for Pruning During Distillation
-    """
     def __init__(self, student, teacher, train_loader, test_loader, device, args):
         self.student = student
         self.teacher = teacher
@@ -65,15 +38,29 @@ class PDDTrainer:
         self.device = device
         self.args = args
         
-        # Initialize masks for each conv layer
-        self.masks = {}
-        self.mask_params = []
-        self._initialize_masks()
-        self._wrap_conv_layers()
+        # ذخیره نام لایه‌های conv اصلی
+        self.conv_names = []
+        for name, module in self.student.named_modules():
+            if isinstance(module, nn.Conv2d):
+                self.conv_names.append(name)
         
-        # Setup optimizer and scheduler
+        # ایجاد ماسک‌ها با نام کامل لایه
+        self.masks = {}
+        for name in self.conv_names:
+            module = dict(self.student.named_modules())[name]
+            mask = nn.Parameter(
+                torch.randn(module.out_channels, device=self.device) * 0.5,
+                requires_grad=True
+            )
+            self.masks[name] = mask
+        
+        self.mask_params = list(self.masks.values())
+        print(f"Initialized {len(self.masks)} learnable masks")
+        
+        # Optimizer: تمام پارامترهای مدل + ماسک‌ها
+        all_params = list(self.student.parameters()) + self.mask_params
         self.optimizer = torch.optim.SGD(
-            list(self.student.parameters()) + self.mask_params,
+            all_params,
             lr=args.lr,
             momentum=args.momentum,
             weight_decay=args.weight_decay
@@ -85,54 +72,41 @@ class PDDTrainer:
             gamma=args.lr_decay_rate
         )
         
-        # Loss function
         self.ce_loss = nn.CrossEntropyLoss()
-    
-    def _initialize_masks(self):
-        """Initialize differentiable masks for each conv layer"""
-        for name, module in self.student.named_modules():
-            if isinstance(module, nn.Conv2d):
-                # Initialize mask with values that will result in ~50% pruning
-                # Values around 0 will be around 0.5 after ApproxSign
-                mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.5,
-                    requires_grad=True
-                )
-                self.masks[name] = mask
-                self.mask_params.append(mask)
-                
-        print(f"Initialized {len(self.masks)} learnable masks")
-    
-    def _wrap_conv_layers(self):
-        """Wrap conv layers with masked versions"""
-        def wrap_module(module, prefix=''):
-            for name, child in module.named_children():
-                full_name = f"{prefix}.{name}" if prefix else name
-                
-                if isinstance(child, nn.Conv2d) and full_name in self.masks:
-                    # Wrap with masked version
-                    wrapped = MaskedConv2d(child, self.masks[full_name])
-                    setattr(module, name, wrapped)
-                else:
-                    # Recursively wrap
-                    wrap_module(child, full_name)
-        
-        wrap_module(self.student)
-    
+        self.original_forward = {}  # ذخیره forward اصلی
+
+        # جایگزینی موقت forward
+        self._replace_forward()
+
+    def _replace_forward(self):
+        """موقتاً forward لایه‌های conv را برای اعمال ماسک تغییر بده"""
+        def make_hook(name):
+            def forward_hook(module, inp, out):
+                binary_mask = ApproxSign.apply(self.masks[name])
+                return out * binary_mask.view(1, -1, 1, 1)
+            return forward_hook
+
+        for name in self.conv_names:
+            module = dict(self.student.named_modules())[name]
+            self.original_forward[name] = module.register_forward_hook(
+                make_hook(name)
+            )
+
+    def _restore_forward(self):
+        """حذف hook‌ها و بازگردانی forward اصلی"""
+        for hook in self.original_forward.values():
+            hook.remove()
+        self.original_forward.clear()
+
     def distillation_loss(self, student_logits, teacher_logits, temperature):
-        """
-        Compute KL divergence loss for distillation
-        """
         student_soft = F.log_softmax(student_logits / temperature, dim=1)
         teacher_soft = F.softmax(teacher_logits / temperature, dim=1)
         kl_loss = F.kl_div(student_soft, teacher_soft, reduction='batchmean')
         return kl_loss * (temperature ** 2)
-    
+
     def train_epoch(self, epoch):
-        """Train for one epoch"""
         self.student.train()
         self.teacher.eval()
-        
         total_loss = 0.0
         distill_loss_sum = 0.0
         ce_loss_sum = 0.0
@@ -140,107 +114,70 @@ class PDDTrainer:
         total = 0
         
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.args.epochs}')
-        
         for inputs, targets in pbar:
             inputs, targets = inputs.to(self.device), targets.to(self.device)
-            
             self.optimizer.zero_grad()
             
-            # Forward pass (masks are applied automatically in wrapped layers)
             student_logits = self.student(inputs)
-            
             with torch.no_grad():
                 teacher_logits = self.teacher(inputs)
             
-            # Compute losses
             ce_loss = self.ce_loss(student_logits, targets)
             distill_loss = self.distillation_loss(
                 student_logits, teacher_logits, self.args.temperature
             )
-            
-            # Total loss
             loss = self.args.alpha * distill_loss + (1 - self.args.alpha) * ce_loss
-            
-            # Backward pass
             loss.backward()
             self.optimizer.step()
             
-            # Statistics
             total_loss += loss.item()
             distill_loss_sum += distill_loss.item()
             ce_loss_sum += ce_loss.item()
-            
             _, predicted = student_logits.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
             
-            # Update progress bar
             pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}',
                 'Acc': f'{100.*correct/total:.2f}%'
             })
         
-        avg_loss = total_loss / len(self.train_loader)
-        avg_distill = distill_loss_sum / len(self.train_loader)
-        avg_ce = ce_loss_sum / len(self.train_loader)
-        train_acc = 100. * correct / total
-        
-        return avg_loss, avg_distill, avg_ce, train_acc
-    
+        return (total_loss / len(self.train_loader),
+                distill_loss_sum / len(self.train_loader),
+                ce_loss_sum / len(self.train_loader),
+                100. * correct / total)
+
     def evaluate(self):
-        """Evaluate the student model"""
         self.student.eval()
-        
         correct = 0
         total = 0
         test_loss = 0.0
-        
         with torch.no_grad():
             for inputs, targets in self.test_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                
                 outputs = self.student(inputs)
                 loss = self.ce_loss(outputs, targets)
-                
                 test_loss += loss.item()
                 _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
-        
-        test_acc = 100. * correct / total
-        avg_loss = test_loss / len(self.test_loader)
-        
-        return avg_loss, test_acc
-    
+        return test_loss / len(self.test_loader), 100. * correct / total
+
     def train(self):
-        """Main training loop"""
         print(f"\nStarting Pruning During Distillation...")
         print(f"Temperature: {self.args.temperature}, Alpha: {self.args.alpha}")
-        
         best_acc = 0.0
         
         for epoch in range(self.args.epochs):
-            # Train
             train_loss, distill_loss, ce_loss, train_acc = self.train_epoch(epoch)
-            
-            # Evaluate
             test_loss, test_acc = self.evaluate()
-            
-            # Update learning rate
             self.scheduler.step()
             
-            # Calculate pruning statistics
-            total_channels = 0
-            kept_channels = 0
-            with torch.no_grad():
-                for name, mask in self.masks.items():
-                    binary_mask = ApproxSign.apply(mask)
-                    total_channels += binary_mask.numel()
-                    kept_channels += (binary_mask > 0.5).sum().item()
-            
+            # محاسبه pruning ratio
+            total_channels = sum(m.numel() for m in self.masks.values())
+            kept_channels = sum((ApproxSign.apply(m) > 0.5).sum().item() for m in self.masks.values())
             pruning_ratio = (1 - kept_channels / total_channels) * 100 if total_channels > 0 else 0
             
-            # Print statistics
             print(f"\nEpoch [{epoch+1}/{self.args.epochs}]")
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
             print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
@@ -251,13 +188,14 @@ class PDDTrainer:
                 best_acc = test_acc
                 print(f"New best accuracy: {best_acc:.2f}%")
         
+        # قبل از ذخیره، forward اصلی بازگردانده شود
+        self._restore_forward()
         print(f"\nTraining completed!")
         print(f"Best Test Accuracy: {best_acc:.2f}%")
-        
         return best_acc
-    
+
     def get_masks(self):
-        """Get binary masks after training"""
+        """بازگرداندن ماسک‌های باینری با نام کامل لایه"""
         binary_masks = {}
         with torch.no_grad():
             for name, mask in self.masks.items():
