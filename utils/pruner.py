@@ -139,13 +139,17 @@ def create_pruned_resnet20(original_model, masks):
                 new_modules[shortcut_bn].num_features = len(out_keep)
 
     # linear layer
+        # Linear (classifier) layer
     if 'layer3.2.conv2' in channel_map:
         final_out = len(channel_map['layer3.2.conv2'])
     else:
         final_out = orig_modules['layer3.2.conv2'].out_channels
-    new_model.fc = nn.Linear(final_out, 10)
-    new_model.fc.weight.data = orig_modules['linear'].weight.data[:, :final_out]
-    new_model.fc.bias.data = orig_modules['linear'].bias.data
+
+    # جایگزینی لایه خطی
+    pruned_model.linear = nn.Linear(final_out, 10)
+    # کپی وزن‌ها (فقط ستون‌های مربوط به کانال‌های باقی‌مانده)
+    pruned_model.linear.weight.data = orig_modules['linear'].weight.data[:, :final_out]
+    pruned_model.linear.bias.data = orig_modules['linear'].bias.data
 
     return pruned_model
 
