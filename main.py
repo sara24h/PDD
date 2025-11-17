@@ -170,28 +170,7 @@ def main():
     print("Phase 2: Pruning Model")
     print("="*50)
     
-    # Get unwrapped student model (remove MaskedConv2d wrappers)
-    def unwrap_model(model):
-        """Unwrap MaskedConv2d layers"""
-        unwrapped = type(model)(num_classes=10)
-        unwrapped.load_state_dict(model.state_dict(), strict=False)
-        return unwrapped
-    
-    # Create a clean copy for pruning
-    clean_student = resnet20(num_classes=10).to(device)
-    
-    # Load weights from trained student
-    student_state = {}
-    for name, param in student.named_parameters():
-        if 'conv' in name or 'linear' in name:
-            clean_name = name.replace('.conv.', '.')
-            student_state[clean_name] = param.data
-        else:
-            student_state[name] = param.data
-    
-    clean_student.load_state_dict(student_state, strict=False)
-    
-    pruner = ModelPruner(clean_student, trainer.get_masks())
+    pruner = ModelPruner(student, trainer.get_masks())
     pruned_student = pruner.prune()
     
     # Calculate compression statistics
