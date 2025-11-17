@@ -6,134 +6,149 @@ from thop import profile
 
 def create_pruned_resnet20(original_model, masks):
     """
-    Create a new pruned ResNet20 with consistent channel dimensions.
-    Enforces that conv2 and shortcut in each block have the same output channels.
+    Create a pruned ResNet20 ensuring conv2 and shortcut have IDENTICAL output channels.
+    This is critical because: out = conv2(x) + shortcut(x)
     """
     pruned_model = resnet20(num_classes=10)
     orig_modules = dict(original_model.named_modules())
     new_modules = dict(pruned_model.named_modules())
     channel_map = {}
 
-    # === 1. First conv layer ===
-    if 'conv1' in masks:
-        keep = (masks['conv1'].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
-        if len(keep) == 0:
-            keep = torch.tensor([0])
-        channel_map['conv1'] = keep
-        new_modules['conv1'].weight.data = orig_modules['conv1'].weight.data[keep]
-        if orig_modules['conv1'].bias is not None:
-            new_modules['conv1'].bias.data = orig_modules['conv1'].bias.data[keep]
-        new_modules['conv1'].out_channels = len(keep)
-        # BatchNorm1
-        new_modules['bn1'].weight.data = orig_modules['bn1'].weight.data[keep]
-        new_modules['bn1'].bias.data = orig_modules['bn1'].bias.data[keep]
-        new_modules['bn1'].running_mean = orig_modules['bn1'].running_mean[keep]
-        new_modules['bn1'].running_var = orig_modules['bn1'].running_var[keep]
-        new_modules['bn1'].num_features = len(keep)
-    else:
-        new_modules['conv1'].load_state_dict(orig_modules['conv1'].state_dict())
-        new_modules['bn1'].load_state_dict(orig_modules['bn1'].state_dict())
-        channel_map['conv1'] = torch.arange(orig_modules['conv1'].out_channels)
+    print("\n--- Starting Pruning Process ---")
 
-    # === 2. Main layers: layer1, layer2, layer3 ===
-    for layer_name in ['layer1', 'layer2', 'layer3']:
+    # === 1. Prune first conv layer ===
+    if 'conv1' in masks:
+        keep_idx = (masks['conv1'].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
+        if len(keep_idx) == 0:
+            keep_idx = torch.tensor([0])
+        print(f"conv1: {orig_modules['conv1'].out_channels} -> {len(keep_idx)} channels")
+    else:
+        keep_idx = torch.arange(orig_modules['conv1'].out_channels)
+        print(f"conv1: keeping all {len(keep_idx)} channels")
+    
+    channel_map['conv1'] = keep_idx
+    
+    # Apply pruning
+    new_modules['conv1'].weight = nn.Parameter(
+        orig_modules['conv1'].weight.data[keep_idx].clone()
+    )
+    new_modules['conv1'].out_channels = len(keep_idx)
+    
+    new_modules['bn1'].weight = nn.Parameter(orig_modules['bn1'].weight.data[keep_idx].clone())
+    new_modules['bn1'].bias = nn.Parameter(orig_modules['bn1'].bias.data[keep_idx].clone())
+    new_modules['bn1'].running_mean = orig_modules['bn1'].running_mean[keep_idx].clone()
+    new_modules['bn1'].running_var = orig_modules['bn1'].running_var[keep_idx].clone()
+    new_modules['bn1'].num_features = len(keep_idx)
+
+    # === 2. Process each layer and block ===
+    for layer_idx, layer_name in enumerate(['layer1', 'layer2', 'layer3']):
+        print(f"\n--- Processing {layer_name} ---")
+        
         for block_idx in range(3):
             prefix = f"{layer_name}.{block_idx}"
+            
+            # Get input channels
+            if block_idx == 0:
+                if layer_idx == 0:
+                    in_channels_idx = channel_map['conv1']
+                else:
+                    prev_layer = ['layer1', 'layer2', 'layer3'][layer_idx - 1]
+                    in_channels_idx = channel_map[f'{prev_layer}.2.out']
+            else:
+                in_channels_idx = channel_map[f'{layer_name}.{block_idx-1}.out']
+            
+            # Determine block output channels
+            conv2_name = f"{prefix}.conv2"
+            shortcut_name = f"{prefix}.shortcut.0"
+            has_shortcut = shortcut_name in orig_modules
+            
+            # CRITICAL: Use conv2 mask to determine output channels
+            if conv2_name in masks:
+                out_channels_idx = (masks[conv2_name].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
+                if len(out_channels_idx) == 0:
+                    out_channels_idx = torch.tensor([0])
+                print(f"  {prefix}: {orig_modules[conv2_name].out_channels} -> {len(out_channels_idx)} channels (masked)")
+            else:
+                out_channels_idx = torch.arange(orig_modules[conv2_name].out_channels)
+                print(f"  {prefix}: keeping all {len(out_channels_idx)} channels (no mask)")
+            
+            # Save output channels for next block
+            channel_map[f'{prefix}.out'] = out_channels_idx
+            
+            # --- Process conv1 ---
             conv1_name = f"{prefix}.conv1"
             bn1_name = f"{prefix}.bn1"
-            conv2_name = f"{prefix}.conv2"
-            bn2_name = f"{prefix}.bn2"
-            shortcut_conv = f"{prefix}.shortcut.0"
-            shortcut_bn = f"{prefix}.shortcut.1"
-
-            # Determine input channels for conv1
-            if block_idx == 0:
-                if layer_name == 'layer1':
-                    in_keep = channel_map['conv1']
-                elif layer_name == 'layer2':
-                    in_keep = channel_map['layer1.2.conv2']
-                else:  # layer3
-                    in_keep = channel_map['layer2.2.conv2']
-            else:
-                in_keep = channel_map[f"{layer_name}.{block_idx-1}.conv2"]
-
-            # --- Determine output channels (CRITICAL: use conv2 mask if exists, else use shortcut requirement) ---
-            has_shortcut = shortcut_conv in orig_modules
             
-            if conv2_name in masks:
-                # Use conv2 mask to determine output channels
-                out_keep_block = (masks[conv2_name].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
-                if len(out_keep_block) == 0:
-                    out_keep_block = torch.tensor([0])
-            elif has_shortcut:
-                # If no conv2 mask but has shortcut, use original conv2 out_channels
-                out_keep_block = torch.arange(orig_modules[conv2_name].out_channels)
-            else:
-                # No shortcut, no mask - keep all channels
-                out_keep_block = torch.arange(orig_modules[conv2_name].out_channels)
-
-            # Save for next block
-            channel_map[conv2_name] = out_keep_block
-
-            # --- Prune conv1 ---
             if conv1_name in masks:
-                out_keep1 = (masks[conv1_name].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
-                if len(out_keep1) == 0:
-                    out_keep1 = torch.tensor([0])
+                conv1_out_idx = (masks[conv1_name].cpu().squeeze() > 0.5).nonzero(as_tuple=True)[0]
+                if len(conv1_out_idx) == 0:
+                    conv1_out_idx = torch.tensor([0])
             else:
-                out_keep1 = torch.arange(orig_modules[conv1_name].out_channels)
+                conv1_out_idx = torch.arange(orig_modules[conv1_name].out_channels)
             
-            channel_map[conv1_name] = out_keep1
+            # Prune conv1: [out_channels, in_channels, k, k]
+            orig_w1 = orig_modules[conv1_name].weight.data
+            new_w1 = orig_w1[conv1_out_idx][:, in_channels_idx, :, :]
+            new_modules[conv1_name].weight = nn.Parameter(new_w1.clone())
+            new_modules[conv1_name].in_channels = len(in_channels_idx)
+            new_modules[conv1_name].out_channels = len(conv1_out_idx)
             
-            # Apply pruning to conv1
-            w1 = orig_modules[conv1_name].weight.data[out_keep1][:, in_keep]
-            new_modules[conv1_name].weight.data = w1
-            new_modules[conv1_name].in_channels = len(in_keep)
-            new_modules[conv1_name].out_channels = len(out_keep1)
+            # Prune bn1
+            new_modules[bn1_name].weight = nn.Parameter(orig_modules[bn1_name].weight.data[conv1_out_idx].clone())
+            new_modules[bn1_name].bias = nn.Parameter(orig_modules[bn1_name].bias.data[conv1_out_idx].clone())
+            new_modules[bn1_name].running_mean = orig_modules[bn1_name].running_mean[conv1_out_idx].clone()
+            new_modules[bn1_name].running_var = orig_modules[bn1_name].running_var[conv1_out_idx].clone()
+            new_modules[bn1_name].num_features = len(conv1_out_idx)
             
-            # BN1
-            new_modules[bn1_name].weight.data = orig_modules[bn1_name].weight.data[out_keep1]
-            new_modules[bn1_name].bias.data = orig_modules[bn1_name].bias.data[out_keep1]
-            new_modules[bn1_name].running_mean = orig_modules[bn1_name].running_mean[out_keep1]
-            new_modules[bn1_name].running_var = orig_modules[bn1_name].running_var[out_keep1]
-            new_modules[bn1_name].num_features = len(out_keep1)
-
-            # --- Prune conv2 (USE out_keep_block) ---
-            in_keep2 = out_keep1
+            # --- Process conv2 (use out_channels_idx) ---
+            bn2_name = f"{prefix}.bn2"
             
-            w2 = orig_modules[conv2_name].weight.data[out_keep_block][:, in_keep2]
-            new_modules[conv2_name].weight.data = w2
-            new_modules[conv2_name].in_channels = len(in_keep2)
-            new_modules[conv2_name].out_channels = len(out_keep_block)
+            # Prune conv2: [out_channels, in_channels, k, k]
+            orig_w2 = orig_modules[conv2_name].weight.data
+            new_w2 = orig_w2[out_channels_idx][:, conv1_out_idx, :, :]
+            new_modules[conv2_name].weight = nn.Parameter(new_w2.clone())
+            new_modules[conv2_name].in_channels = len(conv1_out_idx)
+            new_modules[conv2_name].out_channels = len(out_channels_idx)
             
-            # BN2
-            new_modules[bn2_name].weight.data = orig_modules[bn2_name].weight.data[out_keep_block]
-            new_modules[bn2_name].bias.data = orig_modules[bn2_name].bias.data[out_keep_block]
-            new_modules[bn2_name].running_mean = orig_modules[bn2_name].running_mean[out_keep_block]
-            new_modules[bn2_name].running_var = orig_modules[bn2_name].running_var[out_keep_block]
-            new_modules[bn2_name].num_features = len(out_keep_block)
-
-            # --- Handle shortcut (MUST USE SAME out_keep_block) ---
+            # Prune bn2
+            new_modules[bn2_name].weight = nn.Parameter(orig_modules[bn2_name].weight.data[out_channels_idx].clone())
+            new_modules[bn2_name].bias = nn.Parameter(orig_modules[bn2_name].bias.data[out_channels_idx].clone())
+            new_modules[bn2_name].running_mean = orig_modules[bn2_name].running_mean[out_channels_idx].clone()
+            new_modules[bn2_name].running_var = orig_modules[bn2_name].running_var[out_channels_idx].clone()
+            new_modules[bn2_name].num_features = len(out_channels_idx)
+            
+            # --- Process shortcut (MUST use same out_channels_idx as conv2!) ---
             if has_shortcut:
-                # Prune shortcut conv using same output channels as conv2
-                w_sc = orig_modules[shortcut_conv].weight.data[out_keep_block][:, in_keep]
-                new_modules[shortcut_conv].weight.data = w_sc
-                new_modules[shortcut_conv].in_channels = len(in_keep)
-                new_modules[shortcut_conv].out_channels = len(out_keep_block)
+                sc_bn_name = f"{prefix}.shortcut.1"
+                
+                print(f"    Pruning shortcut: in={len(in_channels_idx)}, out={len(out_channels_idx)}")
+                
+                # Prune shortcut conv: [out_channels, in_channels, k, k]
+                orig_w_sc = orig_modules[shortcut_name].weight.data
+                new_w_sc = orig_w_sc[out_channels_idx][:, in_channels_idx, :, :]
+                new_modules[shortcut_name].weight = nn.Parameter(new_w_sc.clone())
+                new_modules[shortcut_name].in_channels = len(in_channels_idx)
+                new_modules[shortcut_name].out_channels = len(out_channels_idx)
+                
+                # Prune shortcut bn
+                new_modules[sc_bn_name].weight = nn.Parameter(orig_modules[sc_bn_name].weight.data[out_channels_idx].clone())
+                new_modules[sc_bn_name].bias = nn.Parameter(orig_modules[sc_bn_name].bias.data[out_channels_idx].clone())
+                new_modules[sc_bn_name].running_mean = orig_modules[sc_bn_name].running_mean[out_channels_idx].clone()
+                new_modules[sc_bn_name].running_var = orig_modules[sc_bn_name].running_var[out_channels_idx].clone()
+                new_modules[sc_bn_name].num_features = len(out_channels_idx)
 
-                # Prune shortcut BN
-                new_modules[shortcut_bn].weight.data = orig_modules[shortcut_bn].weight.data[out_keep_block]
-                new_modules[shortcut_bn].bias.data = orig_modules[shortcut_bn].bias.data[out_keep_block]
-                new_modules[shortcut_bn].running_mean = orig_modules[shortcut_bn].running_mean[out_keep_block]
-                new_modules[shortcut_bn].running_var = orig_modules[shortcut_bn].running_var[out_keep_block]
-                new_modules[shortcut_bn].num_features = len(out_keep_block)
+    # === 3. Prune final linear layer ===
+    final_channels_idx = channel_map['layer3.2.out']
+    print(f"\n--- Pruning linear layer ---")
+    print(f"  Input features: {orig_modules['linear'].in_features} -> {len(final_channels_idx)}")
+    
+    pruned_model.linear = nn.Linear(len(final_channels_idx), 10)
+    pruned_model.linear.weight = nn.Parameter(
+        orig_modules['linear'].weight.data[:, final_channels_idx].clone()
+    )
+    pruned_model.linear.bias = nn.Parameter(orig_modules['linear'].bias.data.clone())
 
-    # === 3. Classifier ===
-    final_in = len(channel_map['layer3.2.conv2'])
-    pruned_model.linear = nn.Linear(final_in, 10)
-    pruned_model.linear.weight.data = orig_modules['linear'].weight.data[:, :final_in]
-    pruned_model.linear.bias.data = orig_modules['linear'].bias.data
-
+    print("\n--- Pruning Complete ---\n")
     return pruned_model
 
 
@@ -144,23 +159,43 @@ class ModelPruner:
         self._pruned_model = None
 
     def prune(self):
-        """Prune the model once and cache the result"""
+        """Prune the model (cached after first call)"""
         if self._pruned_model is None:
-            print("\nPruning model based on learned masks...")
+            print("\n" + "="*60)
+            print("PRUNING MODEL BASED ON LEARNED MASKS")
+            print("="*60)
             self._pruned_model = create_pruned_resnet20(self.model.cpu(), self.masks)
-            print("✓ Pruning completed successfully")
+            
+            # Validate the pruned model
+            print("Validating pruned model...")
+            dummy = torch.randn(1, 3, 32, 32)
+            try:
+                with torch.no_grad():
+                    output = self._pruned_model(dummy)
+                print(f"✓ Validation successful! Output shape: {output.shape}")
+            except Exception as e:
+                print(f"✗ Validation failed: {e}")
+                raise
+            
+            print("="*60 + "\n")
+        
         return self._pruned_model
 
     def get_params_count(self):
+        """Calculate parameter counts"""
         orig = sum(p.numel() for p in self.model.parameters())
         pruned = sum(p.numel() for p in self.prune().parameters())
         return orig, pruned
 
     def get_flops_count(self, input_size=(1, 3, 32, 32)):
+        """Calculate FLOPs"""
         dummy = torch.randn(input_size)
-        orig_flops, _ = profile(self.model.cpu(), inputs=(dummy,), verbose=False)
         
-        # Use cached pruned model
+        # Original FLOPs
+        self.model.cpu()
+        orig_flops, _ = profile(self.model, inputs=(dummy,), verbose=False)
+        
+        # Pruned FLOPs
         pruned_model = self.prune()
         pruned_flops, _ = profile(pruned_model, inputs=(dummy,), verbose=False)
         
