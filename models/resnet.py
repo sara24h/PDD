@@ -38,11 +38,9 @@ class ResNet(nn.Module):
 
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(16)
-        
         self.layer1 = self._make_layer(block, 16, num_blocks[0], stride=1)
         self.layer2 = self._make_layer(block, 32, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 64, num_blocks[2], stride=2)
-        
         self.linear = nn.Linear(64 * block.expansion, num_classes)
 
     def _make_layer(self, block, planes, num_blocks, stride):
@@ -64,9 +62,13 @@ class ResNet(nn.Module):
         return out
 
 
-def ResNet20(num_classes=10):
+def resnet20(num_classes=10):
     return ResNet(BasicBlock, [3, 3, 3], num_classes=num_classes)
 
 
-def ResNet56(num_classes=10):
+def resnet56(num_classes=10):
     return ResNet(BasicBlock, [9, 9, 9], num_classes=num_classes)
+
+
+def resnet110(num_classes=10):
+    return ResNet(BasicBlock, [18, 18, 18], num_classes=num_classes)
