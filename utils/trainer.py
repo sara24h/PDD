@@ -6,12 +6,10 @@ from tqdm import tqdm
 
 class PDDTrainer:
     """
-    Pruning During Distillation Trainer - Fixed to match paper exactly
+    PDD Trainer with proper identity shortcut handling.
     
-    Key fixes:
-    1. Masks for ALL conv layers (including conv2 in all blocks)
-    2. Independent shortcut conv masks
-    3. Proper identity shortcut handling via padding/projection
+    Key insight: For blocks with identity shortcuts, conv2 mask must match 
+    the input dimensions during training, not during pruning!
     """
     
     def __init__(self, student, teacher, train_loader, test_loader, device, args):
@@ -22,12 +20,13 @@ class PDDTrainer:
         self.device = device
         self.args = args
         
-        # Initialize learnable masks for ALL conv layers
+        # Initialize learnable masks
         self.masks = nn.ParameterDict()
         self.mask_to_layer = {}
+        self.identity_constraints = {}  # Track which layers need constraints
         self._initialize_masks()
         
-        # Optimizer includes both model parameters and masks
+        # Optimizer
         params = list(student.parameters()) + list(self.masks.parameters())
         self.optimizer = torch.optim.SGD(
             params,
@@ -36,7 +35,7 @@ class PDDTrainer:
             weight_decay=args.weight_decay
         )
         
-        # Learning rate scheduler
+        # Scheduler
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
             self.optimizer,
             milestones=args.lr_decay_epochs,
@@ -48,22 +47,39 @@ class PDDTrainer:
     
     def _initialize_masks(self):
         """
-        Initialize masks for ALL convolutional layers as per paper.
-        Each conv layer gets a learnable mask that can be optimized during training.
+        Initialize masks with awareness of identity shortcuts.
+        For conv2 in blocks WITHOUT projection shortcut, we need special handling.
         """
         mask_count = 0
+        constrained_count = 0
 
         print("\n" + "="*70)
-        print("Initializing Learnable Masks (Paper-compliant)")
+        print("Initializing Learnable Masks with Identity Shortcut Awareness")
         print("="*70)
 
         for name, module in self.student.named_modules():
             if not isinstance(module, nn.Conv2d):
                 continue
 
-            # Add mask for EVERY conv layer
+            # Add mask for every conv layer
             self._add_mask(name, module)
             mask_count += 1
+            
+            # Check if this is a conv2 with identity shortcut
+            is_identity_constrained = False
+            if 'conv2' in name and 'layer' in name:
+                parts = name.split('.')
+                layer_name = parts[0]
+                block_idx = int(parts[1])
+                
+                # First block of each layer has projection shortcut
+                # Other blocks have identity shortcut
+                if block_idx > 0:
+                    # This conv2 feeds into identity shortcut
+                    # Its output channels must match input channels
+                    self.identity_constraints[name] = True
+                    is_identity_constrained = True
+                    constrained_count += 1
             
             # Determine layer type for logging
             if name == 'conv1':
@@ -73,37 +89,31 @@ class PDDTrainer:
             elif 'conv1' in name:
                 layer_type = "Block Conv1"
             elif 'conv2' in name:
-                layer_type = "Block Conv2"
+                if is_identity_constrained:
+                    layer_type = "Block Conv2 (Identity Constrained)"
+                else:
+                    layer_type = "Block Conv2"
             else:
                 layer_type = "Unknown"
             
-            print(f"  ✓ {name:<35} | Channels: {module.out_channels:3d} | Type: {layer_type}")
+            marker = "⚠" if is_identity_constrained else "✓"
+            print(f"  {marker} {name:<35} | Channels: {module.out_channels:3d} | Type: {layer_type}")
 
         print("="*70)
         print(f"Total Masks Created: {mask_count}")
-        print(f"Strategy: Mask ALL conv layers as per paper Section 'The Proposed Method'")
+        print(f"Identity Constrained Layers: {constrained_count}")
+        print(f"Strategy: Mask all conv layers, enforce identity constraints during training")
         print("="*70 + "\n")
 
     def _add_mask(self, name, module):
-        """
-        Add a learnable mask for a conv layer.
-        Initialized randomly in [-1, 1] as per paper.
-        """
-        # Random initialization in [-1, 1]
+        """Add a learnable mask for a conv layer."""
         mask = torch.rand(1, module.out_channels, 1, 1, device=self.device) * 2 - 1
-        
-        # Convert layer name to parameter name
         param_name = name.replace('.', '_')
         self.masks[param_name] = nn.Parameter(mask)
-        
-        # Keep mapping to original name
         self.mask_to_layer[param_name] = name
     
     def approx_sign(self, x):
-        """
-        Differentiable piecewise polynomial function from Equation (2).
-        Approximates sign function with smooth gradients.
-        """
+        """Differentiable approximation of sign function (Equation 2)."""
         return torch.where(
             x < -1,
             torch.zeros_like(x),
@@ -118,13 +128,26 @@ class PDDTrainer:
             )
         )
     
+    def get_constrained_mask(self, layer_name, mask):
+        """
+        Apply identity shortcut constraints to mask.
+        For layers with identity shortcuts, we cannot prune too aggressively.
+        """
+        if layer_name not in self.identity_constraints:
+            return mask
+        
+        # For identity-constrained layers, encourage keeping more channels
+        # by adding a small bias towards 1
+        constrained_mask = mask + 0.3  # Bias towards keeping channels
+        return constrained_mask
+    
     def apply_masks(self, model):
-        """
-        Apply binary masks to conv layers during forward pass.
-        This implements the dynamic mask mechanism from the paper.
-        """
-        def hook_fn(module, input, output, mask):
-            # Convert continuous mask to binary (threshold at 0.5)
+        """Apply masks to conv layers during forward pass."""
+        def hook_fn(module, input, output, mask, layer_name):
+            # Apply constraint if needed
+            if layer_name in self.identity_constraints:
+                mask = self.get_constrained_mask(layer_name, mask)
+            
             binary_mask = (self.approx_sign(mask) > 0.5).float()
             return output * binary_mask
 
@@ -134,32 +157,38 @@ class PDDTrainer:
             if param_name in self.masks:
                 mask = self.masks[param_name]
                 hook = module.register_forward_hook(
-                    lambda m, i, o, mask=mask: hook_fn(m, i, o, mask)
+                    lambda m, i, o, mask=mask, name=name: hook_fn(m, i, o, mask, name)
                 )
                 hooks.append(hook)
 
         return hooks
     
     def distillation_loss(self, student_logits, teacher_logits, temperature):
-        """
-        KL-divergence distillation loss as commonly used in KD literature.
-        Referenced in paper as L(·) in Equation (4).
-        """
+        """KL-divergence distillation loss."""
         student_soft = F.log_softmax(student_logits / temperature, dim=1)
         teacher_soft = F.softmax(teacher_logits / temperature, dim=1)
         return F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (temperature ** 2)
     
+    def compute_mask_regularization(self):
+        """
+        Add L1 regularization on masks to encourage sparsity.
+        This helps achieve better pruning ratios.
+        """
+        l1_loss = 0.0
+        for mask in self.masks.values():
+            # L1 on the continuous mask values
+            l1_loss += torch.abs(mask).sum()
+        return l1_loss * 0.0001  # Small weight for regularization
+    
     def train_epoch(self):
-        """
-        Train for one epoch with distillation and mask learning.
-        Implements Equation (4): L_total = L(z_s, z_t) + CE(z_s, Y)
-        """
+        """Train for one epoch with mask learning."""
         self.student.train()
         hooks = self.apply_masks(self.student)
         
         total_loss = 0
         distill_loss_sum = 0
         ce_loss_sum = 0
+        reg_loss_sum = 0
         correct = 0
         total = 0
         
@@ -170,23 +199,25 @@ class PDDTrainer:
             
             self.optimizer.zero_grad()
             
-            # Forward pass with masks
+            # Forward pass
             student_logits = self.student(inputs)
             
-            # Teacher predictions (no gradient)
             with torch.no_grad():
                 teacher_logits = self.teacher(inputs)
             
-            # Equation (4) from paper
+            # Compute losses
             distill_loss = self.distillation_loss(
                 student_logits, teacher_logits, self.args.temperature
             )
             ce_loss = F.cross_entropy(student_logits, targets)
+            reg_loss = self.compute_mask_regularization()
             
-            # Combined loss (paper uses sum, but alpha weighting is equivalent)
-            loss = self.args.alpha * distill_loss + (1 - self.args.alpha) * ce_loss
+            # Total loss
+            loss = (self.args.alpha * distill_loss + 
+                    (1 - self.args.alpha) * ce_loss + 
+                    reg_loss)
             
-            # Backward pass - updates both model and mask parameters
+            # Backward
             loss.backward()
             self.optimizer.step()
             
@@ -194,6 +225,7 @@ class PDDTrainer:
             total_loss += loss.item()
             distill_loss_sum += distill_loss.item()
             ce_loss_sum += ce_loss.item()
+            reg_loss_sum += reg_loss.item()
             
             _, predicted = student_logits.max(1)
             total += targets.size(0)
@@ -211,12 +243,13 @@ class PDDTrainer:
         avg_loss = total_loss / len(self.train_loader)
         avg_distill = distill_loss_sum / len(self.train_loader)
         avg_ce = ce_loss_sum / len(self.train_loader)
+        avg_reg = reg_loss_sum / len(self.train_loader)
         train_acc = 100. * correct / total
         
-        return avg_loss, train_acc, avg_distill, avg_ce
+        return avg_loss, train_acc, avg_distill, avg_ce, avg_reg
     
     def evaluate(self):
-        """Evaluate on test set with current masks."""
+        """Evaluate on test set."""
         self.student.eval()
         hooks = self.apply_masks(self.student)
         
@@ -245,11 +278,17 @@ class PDDTrainer:
         return avg_loss, accuracy
     
     def get_pruning_ratio(self):
-        """Calculate overall channel pruning ratio."""
+        """Calculate overall pruning ratio."""
         total_channels = 0
         pruned_channels = 0
         
-        for mask in self.masks.values():
+        for param_name, mask in self.masks.items():
+            layer_name = self.mask_to_layer[param_name]
+            
+            # Apply constraint if needed
+            if layer_name in self.identity_constraints:
+                mask = self.get_constrained_mask(layer_name, mask)
+            
             binary_mask = self.approx_sign(mask)
             total_channels += binary_mask.numel()
             pruned_channels += (binary_mask < 0.5).sum().item()
@@ -261,25 +300,30 @@ class PDDTrainer:
         stats = {}
         for param_name, mask in self.masks.items():
             original_name = self.mask_to_layer[param_name]
+            
+            # Apply constraint if needed
+            if original_name in self.identity_constraints:
+                mask = self.get_constrained_mask(original_name, mask)
+            
             binary_mask = self.approx_sign(mask)
             total = binary_mask.numel()
             kept = (binary_mask >= 0.5).sum().item()
             pruned = total - kept
             
+            is_constrained = original_name in self.identity_constraints
+            
             stats[original_name] = {
                 'total': total,
                 'kept': kept,
                 'pruned': pruned,
-                'pruning_ratio': pruned / total if total > 0 else 0
+                'pruning_ratio': pruned / total if total > 0 else 0,
+                'constrained': is_constrained
             }
         
         return stats
     
     def train(self):
-        """
-        Main training loop for PDD.
-        Follows paper Section 'The Proposed Method' and Figure 2.
-        """
+        """Main training loop."""
         print("\n" + "="*70)
         print("Starting Pruning During Distillation (PDD)")
         print("="*70)
@@ -295,18 +339,18 @@ class PDDTrainer:
         for epoch in range(self.args.epochs):
             self.current_epoch = epoch
             
-            # Train one epoch
-            train_loss, train_acc, distill_loss, ce_loss = self.train_epoch()
+            # Train
+            train_loss, train_acc, distill_loss, ce_loss, reg_loss = self.train_epoch()
             
             # Evaluate
             test_loss, test_acc = self.evaluate()
             
-            # Update learning rate
+            # Update LR
             current_lr = self.optimizer.param_groups[0]['lr']
             self.scheduler.step()
             new_lr = self.optimizer.param_groups[0]['lr']
             
-            # Pruning statistics
+            # Pruning stats
             pruning_ratio = self.get_pruning_ratio()
             
             # Print summary
@@ -318,6 +362,7 @@ class PDDTrainer:
             print(f"  Accuracy:      {train_acc:.2f}%")
             print(f"  Distill Loss:  {distill_loss:.4f}")
             print(f"  CE Loss:       {ce_loss:.4f}")
+            print(f"  Reg Loss:      {reg_loss:.6f}")
             print(f"\nValidation:")
             print(f"  Loss:          {test_loss:.4f}")
             print(f"  Accuracy:      {test_acc:.2f}%")
@@ -329,7 +374,6 @@ class PDDTrainer:
                 print(f"  → Updated to:  {new_lr:.6f}")
             print(f"{'='*70}")
             
-            # Track best accuracy
             if test_acc > self.best_acc:
                 self.best_acc = test_acc
                 print(f"\n🎉 New best accuracy: {test_acc:.2f}%")
@@ -340,10 +384,11 @@ class PDDTrainer:
                 print(f"{'-'*70}")
                 stats = self.get_detailed_pruning_stats()
                 for layer_name, stat in stats.items():
+                    constraint_marker = " [CONSTRAINED]" if stat['constrained'] else ""
                     print(f"  {layer_name:<35} | "
                           f"Total: {stat['total']:3d} | "
                           f"Kept: {stat['kept']:3d} | "
-                          f"Pruned: {stat['pruning_ratio']*100:5.1f}%")
+                          f"Pruned: {stat['pruning_ratio']*100:5.1f}%{constraint_marker}")
                 print(f"{'-'*70}")
         
         print(f"\n{'='*70}")
@@ -354,12 +399,15 @@ class PDDTrainer:
         print(f"{'='*70}\n")
     
     def get_masks(self):
-        """
-        Return binary masks after training.
-        Used for actual pruning in Phase 2.
-        """
+        """Return binary masks after training."""
         binary_masks = {}
         for param_name, mask in self.masks.items():
             original_name = self.mask_to_layer[param_name]
+            
+            # Apply constraint if needed
+            if original_name in self.identity_constraints:
+                mask = self.get_constrained_mask(original_name, mask)
+            
             binary_masks[original_name] = self.approx_sign(mask)
+        
         return binary_masks
