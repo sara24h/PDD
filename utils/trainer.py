@@ -58,6 +58,7 @@ class PDDTrainer:
                 mask = self._approx_sign(self.masks[name])
                 
                 # Create a mask for the weights
+                # For conv layers, we only mask the output channels
                 weight_mask = mask.expand_as(module.weight)
                 
                 # Apply the mask to the weights
