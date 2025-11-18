@@ -264,7 +264,7 @@ def main():
         correct = 0
         total = 0
         
-        with torch.no_dict():
+        with torch.no_grad():
             for inputs, targets in test_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                 outputs = pruned_student(inputs)
