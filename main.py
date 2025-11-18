@@ -45,7 +45,7 @@ def download_teacher_checkpoint(checkpoint_path):
 
 
 def load_teacher_model(teacher, checkpoint_path, device):
-    """Load teacher model with flexible key mapping"""
+    """Load teacher model with automatic key mapping"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     # Handle different checkpoint formats
@@ -61,33 +61,37 @@ def load_teacher_model(teacher, checkpoint_path, device):
     else:
         state_dict = checkpoint
     
-    # Key conversion mapping
-    key_mapping = {
-        'fc.': 'linear.',
-        'downsample.': 'shortcut.',
-        'module.': '',  # Remove module. prefix if exists
-    }
-    
+    # تبدیل کلیدها به فرمت سازگار
     new_state_dict = {}
-    for k, v in state_dict.items():
-        new_k = k
-        for old, new in key_mapping.items():
-            new_k = new_k.replace(old, new)
-        new_state_dict[new_k] = v
+    for key, value in state_dict.items():
+        new_key = key
+        # حذف پیشوند module. اگر وجود دارد
+        new_key = new_key.replace('module.', '')
+        # تبدیل downsample به shortcut
+        new_key = new_key.replace('downsample.', 'shortcut.')
+        # تبدیل fc به linear
+        new_key = new_key.replace('fc.', 'linear.')
+        new_state_dict[new_key] = value
     
-    # Try to load
-    try:
-        teacher.load_state_dict(new_state_dict, strict=True)
-        print("✓ Teacher loaded (strict)")
-    except Exception as e:
-        print(f"⚠ Strict loading failed: {str(e)}")
-        print("Trying non-strict loading...")
-        missing, unexpected = teacher.load_state_dict(new_state_dict, strict=False)
-        if missing:
-            print(f"Missing keys: {missing[:5]}...")
-        if unexpected:
-            print(f"Unexpected keys: {unexpected[:5]}...")
+    # بررسی سازگاری
+    model_keys = set(teacher.state_dict().keys())
+    checkpoint_keys = set(new_state_dict.keys())
+    
+    missing_keys = model_keys - checkpoint_keys
+    unexpected_keys = checkpoint_keys - model_keys
+    
+    if missing_keys or unexpected_keys:
+        print(f"⚠ Key mismatch detected:")
+        if missing_keys:
+            print(f"  Missing keys (first 5): {list(missing_keys)[:5]}")
+        if unexpected_keys:
+            print(f"  Unexpected keys (first 5): {list(unexpected_keys)[:5]}")
+        print("  Attempting to load anyway...")
+        teacher.load_state_dict(new_state_dict, strict=False)
         print("✓ Teacher loaded (non-strict)")
+    else:
+        teacher.load_state_dict(new_state_dict, strict=True)
+        print("✓ Teacher loaded successfully (strict)")
     
     return teacher
 
@@ -158,7 +162,7 @@ def main():
             print("https://github.com/chenyaofo/pytorch-cifar-models")
             return
     
-    # Load teacher
+    # Load teacher with automatic key mapping
     print("\nLoading teacher model...")
     teacher = load_teacher_model(teacher, args.teacher_checkpoint, device)
     teacher.eval()
@@ -178,6 +182,11 @@ def main():
     
     teacher_acc = 100. * correct / total
     print(f"Teacher Accuracy: {teacher_acc:.2f}%")
+    
+    if teacher_acc < 50.0:
+        print("\n⚠ WARNING: Teacher accuracy is very low!")
+        print("This might indicate an issue with loading the checkpoint.")
+        print("Please verify the checkpoint file.")
     
     # Phase 1: Pruning During Distillation
     print("\n" + "="*70)
