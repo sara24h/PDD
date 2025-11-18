@@ -41,42 +41,41 @@ class PDDTrainer:
         self.current_epoch = 0
     
     def _initialize_masks(self):
-      
         mask_count = 0
         skip_count = 0
-        
+
         print("\n" + "="*70)
         print("Initializing Learnable Masks for Pruning During Distillation")
         print("="*70)
-        
+
         for name, module in self.student.named_modules():
             if not isinstance(module, nn.Conv2d):
                 continue
-            
-            # Parse layer name
+
+        # Parse layer name
             parts = name.split('.')
-            
-            # Strategy 1: Initial conv1 - always maskable
+
+        # Strategy 1: Initial conv1 - always maskable
             if name == 'conv1':
                 self._add_mask(name, module)
                 mask_count += 1
                 print(f"  ✓ {name:<35} | Channels: {module.out_channels:3d} | Type: Initial Conv")
                 continue
-            
-            # Strategy 2: Residual blocks in layerX
+
+        # Strategy 2: Residual blocks in layerX
             if len(parts) >= 3 and parts[0].startswith('layer'):
                 layer_name = parts[0]      # layer1, layer2, layer3
                 block_idx = int(parts[1])  # 0, 1, 2
                 conv_name = parts[2]       # conv1, conv2, shortcut
-                
-                # Rule 1: All conv1 in blocks are maskable (intermediate features)
+
+            # Rule 1: All conv1 in blocks are maskable (intermediate features)
                 if conv_name == 'conv1':
                     self._add_mask(name, module)
                     mask_count += 1
                     print(f"  ✓ {name:<35} | Channels: {module.out_channels:3d} | Type: Block Conv1")
                     continue
-                
-                # Rule 2: conv2 only in first block (has projection shortcut)
+
+            # Rule 2: conv2 only in first block (has projection shortcut)
                 if conv_name == 'conv2':
                     if block_idx == 0:
                         self._add_mask(name, module)
@@ -86,30 +85,32 @@ class PDDTrainer:
                         skip_count += 1
                         print(f"  ✗ {name:<35} | Channels: {module.out_channels:3d} | SKIP: Identity")
                     continue
-                
-                # Rule 3: Shortcut conv (in block 0) - NO MASK needed
-                # The shortcut will be pruned automatically based on conv2 mask
+
+            # Rule 3: Shortcut conv (in block 0) - NO MASK needed
+            # The shortcut will be pruned automatically based on conv2 mask
                 if conv_name == 'shortcut':
                     skip_count += 1
                     print(f"  - {name:<35} | Channels: {module.out_channels:3d} | Auto: Follow Conv2")
                     continue
-        
+
         print("="*70)
         print(f"Mask Initialization Complete:")
         print(f"  ✓ Masks created:     {mask_count}")
         print(f"  ✗ Layers skipped:    {skip_count}")
         print(f"  Strategy:            Identity shortcut constraints respected")
         print("="*70 + "\n")
-    
-    def _add_mask(self, name, module):
 
+
+    def _add_mask(self, name, module):
+    # Ensure mask is initialized randomly between -1 and 1
         mask = torch.rand(1, module.out_channels, 1, 1, device=self.device) * 2 - 1
 
         param_name = name.replace('.', '_')
         self.masks[param_name] = nn.Parameter(mask)
-        
-        # Keep mapping to original name
+
+    # Keep mapping to original name
         self.mask_to_layer[param_name] = name
+
     
     def approx_sign(self, x):
        
@@ -187,6 +188,7 @@ class PDDTrainer:
             
             # Combined loss with alpha weighting
             loss = self.args.alpha * distill_loss + (1 - self.args.alpha) * ce_loss
+
             
             # Backward pass - updates both model parameters and mask parameters
             loss.backward()
