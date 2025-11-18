@@ -51,17 +51,13 @@ class PDDTrainer:
         return masks
 
     def _apply_masks(self):
-        """Apply masks to the student model"""
+    """Apply masks to the student model"""
         for name, module in self.student.named_modules():
             if name in self.masks and isinstance(module, nn.Conv2d):
-                # Apply the ApproxSign function to the mask
+             # Apply the ApproxSign function to the mask
                 mask = self._approx_sign(self.masks[name])
-                
-                # Create a mask for the weights
-                # For conv layers, we only mask the output channels
-                weight_mask = mask.expand_as(module.weight)
-                
-                # Apply the mask to the weights
+
+                weight_mask = mask.squeeze(0).view(-1, 1, 1, 1)
                 module.weight.data *= weight_mask
 
     def _approx_sign(self, x):
