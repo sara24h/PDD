@@ -6,196 +6,124 @@ from utils.data_loader import get_cifar10_dataloaders
 from models.resnet import resnet20, resnet56
 from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
-from utils.helpers import set_seed, save_checkpoint, load_checkpoint
+from utils.helpers import set_seed, save_checkpoint
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='PDD: Pruning During Distillation')
+    parser = argparse.ArgumentParser(description='PDD Implementation')
     
-    # Data parameters
-    parser.add_argument('--data_dir', type=str, default='./data', help='Dataset directory')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers')
+    # Data
+    parser.add_argument('--data_dir', type=str, default='./data')
+    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--num_workers', type=int, default=4)
     
-    # Model parameters
-    parser.add_argument('--student_model', type=str, default='resnet20', help='Student model')
-    parser.add_argument('--teacher_model', type=str, default='resnet56', help='Teacher model')
+    # Model
     parser.add_argument('--teacher_checkpoint', type=str, 
-                        default='checkpoints/resnet56_cifar10.pth', 
-                        help='Teacher model checkpoint')
+                        default='checkpoints/resnet56_cifar10.pth')
     
-    # Training parameters
-    parser.add_argument('--epochs', type=int, default=50, help='Number of distillation epochs')
-    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
-    parser.add_argument('--momentum', type=float, default=0.9, help='Momentum')
-    parser.add_argument('--weight_decay', type=float, default=0.005, help='Weight decay')
-    parser.add_argument('--lr_decay_epochs', type=list, default=[20, 40], help='LR decay epochs')
-    parser.add_argument('--lr_decay_rate', type=float, default=0.1, help='LR decay rate')
+    # Training (matching paper: 50 epochs for distillation)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--momentum', type=float, default=0.9)
+    parser.add_argument('--weight_decay', type=float, default=0.005)
+    parser.add_argument('--lr_decay_epochs', type=list, default=[20, 40])
+    parser.add_argument('--lr_decay_rate', type=float, default=0.1)
     
-    # Distillation parameters
-    parser.add_argument('--temperature', type=float, default=4.0, help='Distillation temperature')
-    parser.add_argument('--alpha', type=float, default=0.5, help='Weight for distillation loss')
+    # Distillation
+    parser.add_argument('--temperature', type=float, default=4.0)
+    parser.add_argument('--alpha', type=float, default=0.5)
     
-    # Fine-tuning parameters
-    parser.add_argument('--finetune_epochs', type=int, default=100, help='Fine-tuning epochs')
-    parser.add_argument('--finetune_lr', type=float, default=0.01, help='Fine-tuning learning rate')
+    # Fine-tuning (100 epochs as per paper)
+    parser.add_argument('--finetune_epochs', type=int, default=100)
+    parser.add_argument('--finetune_lr', type=float, default=0.01)
     
-    # Other parameters
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--save_dir', type=str, default='./checkpoints', help='Save directory')
-    parser.add_argument('--log_dir', type=str, default='./logs', help='Log directory')
-    parser.add_argument('--device', type=str, default='cuda', help='Device')
+    # Other
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--save_dir', type=str, default='./checkpoints')
+    parser.add_argument('--device', type=str, default='cuda')
     
     return parser.parse_args()
-
-
-def convert_state_dict_keys(state_dict):
-    """Convert checkpoint keys to match model architecture"""
-    new_state_dict = {}
-    
-    for key, value in state_dict.items():
-        new_key = key
-        
-        # Convert fc to linear
-        if 'fc.' in key:
-            new_key = key.replace('fc.', 'linear.')
-        
-        # Convert downsample to shortcut
-        elif 'downsample.' in key:
-            new_key = key.replace('downsample.', 'shortcut.')
-        
-        new_state_dict[new_key] = value
-    
-    return new_state_dict
-
-
-def download_teacher_checkpoint(checkpoint_path):
-    """Download teacher checkpoint from GitHub if not exists"""
-    if not os.path.exists(checkpoint_path):
-        print(f"Downloading teacher checkpoint...")
-        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-        
-        # URL for pretrained ResNet56 on CIFAR10
-        url = "https://github.com/chenyaofo/pytorch-cifar-models/releases/download/resnet/cifar10_resnet56-187c023a.pt"
-        
-        try:
-            import urllib.request
-            urllib.request.urlretrieve(url, checkpoint_path)
-            print(f"Downloaded checkpoint to {checkpoint_path}")
-        except Exception as e:
-            print(f"Error downloading checkpoint: {e}")
-            print("Please download manually from:")
-            print(url)
-            exit(1)
 
 
 def main():
     args = parse_args()
     set_seed(args.seed)
     
-    # Create directories
     os.makedirs(args.save_dir, exist_ok=True)
-    os.makedirs(args.log_dir, exist_ok=True)
-    
-    # Set device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    
+    print(f"Device: {device}")
     
     # Load data
-    print("Loading CIFAR10 dataset...")
+    print("Loading CIFAR10...")
     train_loader, test_loader = get_cifar10_dataloaders(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers
+        args.data_dir, args.batch_size, args.num_workers
     )
     
-    # Create student model
-    print(f"Creating student model: {args.student_model}")
-    student = resnet20(num_classes=10)
-    student = student.to(device)
+    # Create models
+    print("Creating models...")
+    student = resnet20(num_classes=10).to(device)
+    teacher = resnet56(num_classes=10).to(device)
     
-    # Load teacher model
-    print(f"Loading teacher model: {args.teacher_model}")
-    teacher = resnet56(num_classes=10)
-    
-    # Download teacher checkpoint if needed
-    download_teacher_checkpoint(args.teacher_checkpoint)
-    
-    # Load teacher weights with key conversion
+    # Load teacher
     checkpoint = torch.load(args.teacher_checkpoint, map_location=device)
-    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+    if 'state_dict' in checkpoint:
         state_dict = checkpoint['state_dict']
     else:
         state_dict = checkpoint
     
-    # Convert keys to match model architecture
-    state_dict = convert_state_dict_keys(state_dict)
+    # Convert keys if needed
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        k = k.replace('fc.', 'linear.').replace('downsample.', 'shortcut.')
+        new_state_dict[k] = v
     
-    # Load with strict=False to handle any remaining mismatches
-    teacher.load_state_dict(state_dict, strict=False)
-    
-    teacher = teacher.to(device)
+    teacher.load_state_dict(new_state_dict, strict=False)
     teacher.eval()
-    
-    print("Teacher model loaded successfully")
-    
-    # Create trainer
-    print("Initializing PDD Trainer...")
-    trainer = PDDTrainer(
-        student=student,
-        teacher=teacher,
-        train_loader=train_loader,
-        test_loader=test_loader,
-        device=device,
-        args=args
-    )
+    print("✓ Teacher loaded")
     
     # Phase 1: Pruning During Distillation
-    print("\n" + "="*50)
-    print("Phase 1: Pruning During Distillation")
-    print("="*50)
+    print("\n" + "="*70)
+    print("PHASE 1: Pruning During Distillation (50 epochs)")
+    print("="*70)
+    
+    trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args)
     trainer.train()
     
-    # Save student with masks
-    checkpoint_path = os.path.join(args.save_dir, 'student_with_masks.pth')
+    # Save with masks
+    save_path = os.path.join(args.save_dir, 'student_with_masks.pth')
     save_checkpoint({
         'state_dict': student.state_dict(),
         'masks': trainer.get_masks(),
         'args': args
-    }, checkpoint_path)
-    print(f"\nSaved student with masks to {checkpoint_path}")
+    }, save_path)
+    print(f"✓ Saved to {save_path}")
     
-    # Phase 2: Prune the model
-    print("\n" + "="*50)
-    print("Phase 2: Pruning Model")
-    print("="*50)
+    # Phase 2: Prune Model
+    print("\n" + "="*70)
+    print("PHASE 2: Pruning Model")
+    print("="*70)
     
     pruner = ModelPruner(student, trainer.get_masks())
     pruned_student = pruner.prune()
     
-    # Calculate compression statistics
-    original_params, pruned_params = pruner.get_params_count()
-    original_flops, pruned_flops = pruner.get_flops_count()
+    orig_params, pruned_params = pruner.get_params_count()
+    orig_flops, pruned_flops = pruner.get_flops_count()
     
-    params_reduction = (1 - pruned_params / original_params) * 100
-    flops_reduction = (1 - pruned_flops / original_flops) * 100
+    params_red = (1 - pruned_params / orig_params) * 100
+    flops_red = (1 - pruned_flops / orig_flops) * 100
     
-    print(f"\nCompression Statistics:")
-    print(f"Original Parameters: {original_params:,}")
-    print(f"Pruned Parameters: {pruned_params:,}")
-    print(f"Parameters Reduction: {params_reduction:.2f}%")
-    print(f"Original FLOPs: {original_flops:,}")
-    print(f"Pruned FLOPs: {pruned_flops:,}")
-    print(f"FLOPs Reduction: {flops_reduction:.2f}%")
+    print(f"\nCompression Results:")
+    print(f"Parameters: {orig_params:,} → {pruned_params:,} ({params_red:.2f}% reduction)")
+    print(f"FLOPs: {orig_flops:,} → {pruned_flops:,} ({flops_red:.2f}% reduction)")
     
-    # Phase 3: Fine-tune pruned model
-    print("\n" + "="*50)
-    print("Phase 3: Fine-tuning Pruned Model")
-    print("="*50)
+    # Phase 3: Fine-tune
+    print("\n" + "="*70)
+    print("PHASE 3: Fine-tuning Pruned Model (100 epochs)")
+    print("="*70)
     
     pruned_student = pruned_student.to(device)
     
-    # Create optimizer for fine-tuning
     optimizer = torch.optim.SGD(
         pruned_student.parameters(),
         lr=args.finetune_lr,
@@ -204,14 +132,12 @@ def main():
     )
     
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=[60, 80],
-        gamma=args.lr_decay_rate
+        optimizer, milestones=[60, 80], gamma=0.1
     )
     
     criterion = nn.CrossEntropyLoss()
-    
     best_acc = 0.0
+    
     for epoch in range(args.finetune_epochs):
         # Train
         pruned_student.train()
@@ -254,29 +180,31 @@ def main():
         
         test_acc = 100. * correct / total
         
-        print(f"Epoch [{epoch+1}/{args.finetune_epochs}] "
-              f"Train Acc: {train_acc:.2f}% | Test Acc: {test_acc:.2f}%")
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch [{epoch+1}/{args.finetune_epochs}] "
+                  f"Train: {train_acc:.2f}% | Test: {test_acc:.2f}%")
         
-        # Save best model
         if test_acc > best_acc:
             best_acc = test_acc
             save_checkpoint({
                 'epoch': epoch,
                 'state_dict': pruned_student.state_dict(),
                 'accuracy': test_acc,
-                'params_reduction': params_reduction,
-                'flops_reduction': flops_reduction,
+                'params_reduction': params_red,
+                'flops_reduction': flops_red,
                 'args': args
-            }, os.path.join(args.save_dir, 'pruned_student_best.pth'))
+            }, os.path.join(args.save_dir, 'pruned_best.pth'))
         
         scheduler.step()
     
-    print(f"\n{'='*50}")
-    print(f"Final Results:")
+    # Final Results
+    print("\n" + "="*70)
+    print("FINAL RESULTS")
+    print("="*70)
     print(f"Best Test Accuracy: {best_acc:.2f}%")
-    print(f"Parameters Reduction: {params_reduction:.2f}%")
-    print(f"FLOPs Reduction: {flops_reduction:.2f}%")
-    print(f"{'='*50}")
+    print(f"Parameters Reduction: {params_red:.2f}%")
+    print(f"FLOPs Reduction: {flops_red:.2f}%")
+    print("="*70 + "\n")
 
 
 if __name__ == '__main__':
