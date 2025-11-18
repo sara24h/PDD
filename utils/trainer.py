@@ -17,6 +17,9 @@ class PDDTrainer:
         self.masks = {}
         self._initialize_masks()
         
+        # Print after initialization - NOW INSIDE __init__
+        print(f"Initialized {len(self.masks)} learnable masks")
+        
         # Optimizer includes both model parameters and masks
         params = list(student.parameters()) + list(self.masks.values())
         self.optimizer = torch.optim.SGD(
@@ -37,19 +40,14 @@ class PDDTrainer:
         self.current_epoch = 0
     
     def _initialize_masks(self):
-  
+        """Initialize learnable masks for each convolutional layer"""
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-            # Random initialization around 0 (uniform distribution [-1, 1])
-            # This gives approximately 50% chance of each channel being kept/pruned
+                # Random initialization around 0 (uniform distribution [-1, 1])
+                # This gives approximately 50% chance of each channel being kept/pruned
                 mask = nn.Parameter(torch.rand(1, module.out_channels, 1, 1) * 2 - 1)
-            # تغییر اینجا: مستقیماً تنسور را به دستگاه مورد نظر منتقل کنید
-                self.masks[name] = mask.to(self.device) # <-- اینطوری درست می‌شود
-        
-        # اگر دستگاه مدل تغییر کند، باید ماسک‌ها هم تغییر کنند. پس ممکن است بخواهید اطمینان حاصل کنید
-        # که ماسک‌ها همیشه روی همان دستگاهی هستند که مدل است. اما در این حالت، دستگاه ثابت است.
-        
-    print(f"Initialized {len(self.masks)} learnable masks")
+                # Move mask to the same device as the model
+                self.masks[name] = mask.to(self.device)
     
     def approx_sign(self, x):
         """
