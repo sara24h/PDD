@@ -129,23 +129,23 @@ class PDDTrainer:
         )
     
     def apply_masks(self, model):
-       
         def hook_fn(module, input, output, mask):
-            binary_mask = self.approx_sign(mask)
+            binary_mask = (self.approx_sign(mask) > 0.5).float()  # Hard threshold
             return output * binary_mask
-        
-        hooks = []
-        for name, module in model.named_modules():
-            # Convert layer name to mask parameter name
-            param_name = name.replace('.', '_')
-            if param_name in self.masks:
-                mask = self.masks[param_name]
-                hook = module.register_forward_hook(
-                    lambda m, i, o, mask=mask: hook_fn(m, i, o, mask)
-                )
-                hooks.append(hook)
-        
-        return hooks
+
+    hooks = []
+    for name, module in model.named_modules():
+        # Convert layer name to mask parameter name
+        param_name = name.replace('.', '_')
+        if param_name in self.masks:
+            mask = self.masks[param_name]
+            hook = module.register_forward_hook(
+                lambda m, i, o, mask=mask: hook_fn(m, i, o, mask)
+            )
+            hooks.append(hook)
+
+    return hooks
+
     
     def distillation_loss(self, student_logits, teacher_logits, temperature):
     
