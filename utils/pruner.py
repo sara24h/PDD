@@ -1,280 +1,280 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from models.resnet import resnet20
 
 
-def create_pruned_resnet20(original_model, masks, threshold=0.5):
-    """
-    Create pruned ResNet20 following PDD paper methodology.
-    
-    Key fix: Ensures identity shortcut dimension compatibility by forcing
-    conv2 output channels to match the block input channels.
-    """
-    
-    # Create new model
-    pruned_model = resnet20(num_classes=10)
-    orig_modules = dict(original_model.named_modules())
-    new_modules = dict(pruned_model.named_modules())
-    
-    # Track kept channels for each layer
-    channel_map = {}
-    
-    print("\n" + "="*70)
-    print("Creating Pruned Model (Paper-Compliant)")
-    print("="*70)
-    
-    # ========================================
-    # Phase 1: Determine kept channels
-    # ========================================
-    print("\nPhase 1: Analyzing masks...")
-    print("-"*70)
-    
-    # First pass: collect all masks
-    temp_channel_map = {}
-    for name, module in original_model.named_modules():
-        if not isinstance(module, nn.Conv2d):
-            continue
-        
-        if name in masks:
-            mask = masks[name].cpu().squeeze()
-            keep_idx = (mask > threshold).nonzero(as_tuple=True)[0]
-            
-            # Ensure at least 1 channel
-            if len(keep_idx) == 0:
-                keep_idx = torch.tensor([0])
-        else:
-            keep_idx = torch.arange(module.out_channels)
-        
-        temp_channel_map[name] = keep_idx
-    
-    # Second pass: adjust for identity shortcuts
-    for name, module in original_model.named_modules():
-        if not isinstance(module, nn.Conv2d):
-            continue
-        
-        keep_idx = temp_channel_map[name].clone()
-        
-        # Special handling for blocks with identity shortcut
-        if 'conv2' in name and 'layer' in name:
-            parts = name.split('.')
-            layer_name = parts[0]  # e.g., 'layer1'
-            block_idx = int(parts[1])  # e.g., 0, 1, 2
-            
-            # Determine if this block has identity shortcut
-            shortcut_name = f'{layer_name}.{block_idx}.shortcut.0'
-            has_projection = shortcut_name in temp_channel_map
-            
-            if not has_projection:
-                # Identity shortcut: conv2 output must match block input
-                if block_idx == 0:
-                    # First block in layer: input from previous layer or conv1
-                    if layer_name == 'layer1':
-                        input_name = 'conv1'
-                    else:
-                        prev_layer = f'layer{int(layer_name[-1])-1}'
-                        input_name = f'{prev_layer}.2.conv2'
-                else:
-                    # Later blocks: input from previous block's conv2
-                    input_name = f'{layer_name}.{block_idx-1}.conv2'
-                
-                if input_name in temp_channel_map:
-                    expected_channels = len(temp_channel_map[input_name])
-                    
-                    # Force conv2 to have same number of channels as input
-                    if len(keep_idx) != expected_channels:
-                        # Take top-k channels or pad if needed
-                        if len(keep_idx) > expected_channels:
-                            keep_idx = keep_idx[:expected_channels]
-                        else:
-                            # Repeat channels to match
-                            needed = expected_channels - len(keep_idx)
-                            keep_idx = torch.cat([keep_idx, keep_idx[:needed]])
-                        
-                        print(f"  🔧 {name:<35} | Adjusted to {len(keep_idx)} channels (identity constraint)")
-        
-        kept_pct = len(keep_idx) / module.out_channels * 100
-        print(f"  ✓ {name:<35} | {module.out_channels:3d} → {len(keep_idx):3d} ({kept_pct:5.1f}%)")
-        
-        channel_map[name] = keep_idx
-    
-    # ========================================
-    # Phase 2: Build pruned model
-    # ========================================
-    print("\n" + "-"*70)
-    print("Phase 2: Building pruned model...")
-    print("-"*70)
-    
-    # Initial conv1
-    print("\n[Initial Conv]")
-    conv1_out = channel_map['conv1']
-    new_modules['conv1'].weight = nn.Parameter(
-        orig_modules['conv1'].weight.data[conv1_out].clone()
-    )
-    new_modules['conv1'].out_channels = len(conv1_out)
-    
-    # BN1
-    new_modules['bn1'].weight = nn.Parameter(orig_modules['bn1'].weight.data[conv1_out].clone())
-    new_modules['bn1'].bias = nn.Parameter(orig_modules['bn1'].bias.data[conv1_out].clone())
-    new_modules['bn1'].running_mean = orig_modules['bn1'].running_mean[conv1_out].clone()
-    new_modules['bn1'].running_var = orig_modules['bn1'].running_var[conv1_out].clone()
-    new_modules['bn1'].num_features = len(conv1_out)
-    
-    print(f"  conv1: {orig_modules['conv1'].out_channels} → {len(conv1_out)}")
-    
-    # Process each layer
-    for layer_idx, layer_name in enumerate(['layer1', 'layer2', 'layer3']):
-        print(f"\n[{layer_name.upper()}]")
-        
-        for block_idx in range(3):
-            block_name = f"{layer_name}.{block_idx}"
-            print(f"  Block {block_idx}:")
-            
-            # Determine input channels
-            if block_idx == 0:
-                if layer_idx == 0:
-                    in_channels = conv1_out
-                else:
-                    prev_layer = ['layer1', 'layer2', 'layer3'][layer_idx - 1]
-                    in_channels = channel_map[f'{prev_layer}.2.conv2']
-            else:
-                in_channels = channel_map[f'{layer_name}.{block_idx-1}.conv2']
-            
-            # Get output channels
-            conv1_name = f"{block_name}.conv1"
-            conv2_name = f"{block_name}.conv2"
-            conv1_out_ch = channel_map[conv1_name]
-            conv2_out_ch = channel_map[conv2_name]
-            
-            # Prune conv1
-            orig_conv1 = orig_modules[conv1_name]
-            new_conv1 = new_modules[conv1_name]
-            new_w1 = orig_conv1.weight.data[conv1_out_ch][:, in_channels, :, :]
-            new_conv1.weight = nn.Parameter(new_w1.clone())
-            new_conv1.in_channels = len(in_channels)
-            new_conv1.out_channels = len(conv1_out_ch)
-            
-            # Prune bn1
-            bn1_name = f"{block_name}.bn1"
-            new_modules[bn1_name].weight = nn.Parameter(orig_modules[bn1_name].weight.data[conv1_out_ch].clone())
-            new_modules[bn1_name].bias = nn.Parameter(orig_modules[bn1_name].bias.data[conv1_out_ch].clone())
-            new_modules[bn1_name].running_mean = orig_modules[bn1_name].running_mean[conv1_out_ch].clone()
-            new_modules[bn1_name].running_var = orig_modules[bn1_name].running_var[conv1_out_ch].clone()
-            new_modules[bn1_name].num_features = len(conv1_out_ch)
-            
-            print(f"    conv1: {orig_conv1.out_channels} → {len(conv1_out_ch)}")
-            
-            # Prune conv2
-            orig_conv2 = orig_modules[conv2_name]
-            new_conv2 = new_modules[conv2_name]
-            new_w2 = orig_conv2.weight.data[conv2_out_ch][:, conv1_out_ch, :, :]
-            new_conv2.weight = nn.Parameter(new_w2.clone())
-            new_conv2.in_channels = len(conv1_out_ch)
-            new_conv2.out_channels = len(conv2_out_ch)
-            
-            # Prune bn2
-            bn2_name = f"{block_name}.bn2"
-            new_modules[bn2_name].weight = nn.Parameter(orig_modules[bn2_name].weight.data[conv2_out_ch].clone())
-            new_modules[bn2_name].bias = nn.Parameter(orig_modules[bn2_name].bias.data[conv2_out_ch].clone())
-            new_modules[bn2_name].running_mean = orig_modules[bn2_name].running_mean[conv2_out_ch].clone()
-            new_modules[bn2_name].running_var = orig_modules[bn2_name].running_var[conv2_out_ch].clone()
-            new_modules[bn2_name].num_features = len(conv2_out_ch)
-            
-            print(f"    conv2: {orig_conv2.out_channels} → {len(conv2_out_ch)}")
-            
-            # Handle shortcut
-            shortcut_name = f"{block_name}.shortcut.0"
-            if shortcut_name in orig_modules:
-                # Projection shortcut
-                sc_out = channel_map[shortcut_name]
-                orig_sc = orig_modules[shortcut_name]
-                new_sc = new_modules[shortcut_name]
-                
-                new_w_sc = orig_sc.weight.data[sc_out][:, in_channels, :, :]
-                new_sc.weight = nn.Parameter(new_w_sc.clone())
-                new_sc.in_channels = len(in_channels)
-                new_sc.out_channels = len(sc_out)
-                
-                # Prune shortcut BN
-                sc_bn = f"{block_name}.shortcut.1"
-                new_modules[sc_bn].weight = nn.Parameter(orig_modules[sc_bn].weight.data[sc_out].clone())
-                new_modules[sc_bn].bias = nn.Parameter(orig_modules[sc_bn].bias.data[sc_out].clone())
-                new_modules[sc_bn].running_mean = orig_modules[sc_bn].running_mean[sc_out].clone()
-                new_modules[sc_bn].running_var = orig_modules[sc_bn].running_var[sc_out].clone()
-                new_modules[sc_bn].num_features = len(sc_out)
-                
-                print(f"    shortcut: {orig_sc.out_channels} → {len(sc_out)} (projection)")
-            else:
-                print(f"    shortcut: identity")
-    
-    # Final linear layer
-    print("\n[Final Linear]")
-    final_ch = channel_map['layer3.2.conv2']
-    pruned_model.linear = nn.Linear(len(final_ch), 10)
-    pruned_model.linear.weight = nn.Parameter(
-        orig_modules['linear'].weight.data[:, final_ch].clone()
-    )
-    pruned_model.linear.bias = nn.Parameter(orig_modules['linear'].bias.data.clone())
-    
-    print(f"  linear: {orig_modules['linear'].in_features} → {len(final_ch)}")
-    
-    print("\n" + "="*70)
-    print("Pruning Complete!")
-    print("="*70 + "\n")
-    
-    return pruned_model
-
-
 class ModelPruner:
-    """Model pruner that handles ResNet structure correctly."""
-    
-    def __init__(self, model, masks, threshold=0.5):
+    def __init__(self, model, masks):
         self.model = model
         self.masks = masks
-        self.threshold = threshold
         self._pruned_model = None
-    
+        self._original_params = None
+        self._pruned_params = None
+        self._original_flops = None
+        self._pruned_flops = None
+
     def prune(self):
-        """Prune the model based on learned masks."""
-        if self._pruned_model is None:
-            self._pruned_model = create_pruned_resnet20(
-                self.model.cpu(), 
-                self.masks, 
-                self.threshold
-            )
-            
-            # Validate
-            print("Validating pruned model...")
-            dummy = torch.randn(1, 3, 32, 32)
-            try:
-                with torch.no_grad():
-                    output = self._pruned_model(dummy)
-                print(f"✓ Validation successful! Output: {output.shape}")
-            except Exception as e:
-                print(f"✗ Validation failed: {e}")
-                raise
+        """Create a pruned model based on masks"""
+        # Create a new model with adjusted architecture
+        self._pruned_model = resnet20(num_classes=10)
+        
+        # Analyze masks to determine channel counts
+        channel_configs = self._analyze_masks()
+        
+        # Build the pruned model
+        self._build_pruned_model(channel_configs)
+        
+        # Copy weights from original model to pruned model
+        self._copy_weights()
+        
+        # Validate the pruned model
+        self._validate_model()
         
         return self._pruned_model
-    
+
+    def _analyze_masks(self):
+        """Analyze masks to determine channel counts for each layer"""
+        channel_configs = {}
+        
+        # For each layer, determine which channels to keep
+        for name, mask in self.masks.items():
+            # Apply ApproxSign function to get binary mask
+            binary_mask = self._approx_sign(mask)
+            
+            # Count number of channels to keep
+            keep_channels = int(binary_mask.sum().item())
+            total_channels = mask.shape[1]
+            
+            channel_configs[name] = {
+                'keep_indices': torch.where(binary_mask.squeeze())[0],
+                'keep_count': keep_channels,
+                'total_count': total_channels
+            }
+        
+        return channel_configs
+
+    def _approx_sign(self, x):
+        """Differentiable approximation of sign function from the paper"""
+        result = torch.zeros_like(x)
+        
+        # x < -1
+        mask1 = (x < -1).float()
+        result += mask1 * 0.0
+        
+        # -1 <= x < 0
+        mask2 = ((x >= -1) & (x < 0)).float()
+        result += mask2 * ((x + 1) ** 2 / 2)
+        
+        # 0 <= x < 1
+        mask3 = ((x >= 0) & (x < 1)).float()
+        result += mask3 * (2 * x - x**2 + 1) / 2
+        
+        # x >= 1
+        mask4 = (x >= 1).float()
+        result += mask4 * 1.0
+        
+        return result
+
+    def _build_pruned_model(self, channel_configs):
+        """Build the pruned model with adjusted channel counts"""
+        # Adjust the first convolutional layer
+        conv1_keep_count = channel_configs['conv1']['keep_count']
+        self._pruned_model.conv1 = nn.Conv2d(
+            3, conv1_keep_count, kernel_size=3, stride=1, padding=1, bias=False
+        )
+        self._pruned_model.bn1 = nn.BatchNorm2d(conv1_keep_count)
+        
+        # Adjust each layer
+        self._adjust_layer('layer1', channel_configs, 16)
+        self._adjust_layer('layer2', channel_configs, 32)
+        self._adjust_layer('layer3', channel_configs, 64)
+        
+        # Adjust the final linear layer
+        last_layer_name = 'layer3.2.conv2'
+        last_layer_keep_count = channel_configs[last_layer_name]['keep_count']
+        self._pruned_model.linear = nn.Linear(last_layer_keep_count, 10)
+
+    def _adjust_layer(self, layer_name, channel_configs, base_planes):
+        """Adjust a specific layer (layer1, layer2, or layer3)"""
+        layer = getattr(self._pruned_model, layer_name)
+        blocks = []
+        
+        for i in range(3):  # Each layer has 3 blocks in ResNet20
+            # Get the block from the original model
+            original_block = getattr(self.model, layer_name)[i]
+            
+            # Determine input and output channels
+            block_prefix = f"{layer_name}.{i}"
+            
+            # For the first block in each layer, input channels come from the previous layer
+            if i == 0:
+                if layer_name == 'layer1':
+                    in_channels = channel_configs['conv1']['keep_count']
+                else:
+                    # Get the output channels from the last conv of the previous layer
+                    prev_layer_name = 'layer1' if layer_name == 'layer2' else 'layer2'
+                    prev_block_name = f"{prev_layer_name}.2.conv2"
+                    in_channels = channel_configs[prev_block_name]['keep_count']
+            else:
+                # For subsequent blocks, input channels come from the previous block
+                prev_conv_name = f"{block_prefix}.{(i-1) % 3}.conv2"
+                in_channels = channel_configs[prev_conv_name]['keep_count']
+            
+            # Get the output channels for this block
+            conv1_name = f"{block_prefix}.conv1"
+            conv2_name = f"{block_prefix}.conv2"
+            out_channels = channel_configs[conv2_name]['keep_count']
+            
+            # Determine if we need a shortcut
+            stride = 2 if (i == 0 and layer_name != 'layer1') else 1
+            need_shortcut = (stride != 1 or in_channels != out_channels)
+            
+            # Create the block
+            block = self._create_block(in_channels, out_channels, stride, need_shortcut)
+            blocks.append(block)
+        
+        # Replace the layer with the new blocks
+        setattr(self._pruned_model, layer_name, nn.Sequential(*blocks))
+
+    def _create_block(self, in_channels, out_channels, stride, need_shortcut):
+        """Create a BasicBlock with the specified channels"""
+        from models.resnet import BasicBlock
+        block = BasicBlock(in_channels, out_channels, stride)
+        
+        # Adjust the conv layers
+        block.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
+                                stride=stride, padding=1, bias=False)
+        block.bn1 = nn.BatchNorm2d(out_channels)
+        block.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, 
+                                stride=1, padding=1, bias=False)
+        block.bn2 = nn.BatchNorm2d(out_channels)
+        
+        # Adjust the shortcut if needed
+        if need_shortcut:
+            block.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, 
+                         stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+        
+        return block
+
+    def _copy_weights(self):
+        """Copy weights from the original model to the pruned model"""
+        # Copy weights for each layer based on the keep indices
+        for name, config in self._analyze_masks().items():
+            if name in self.masks:
+                # Get the original and pruned layers
+                original_layer = self._get_layer_by_name(self.model, name)
+                pruned_layer = self._get_layer_by_name(self._pruned_model, name)
+                
+                if isinstance(original_layer, nn.Conv2d) and isinstance(pruned_layer, nn.Conv2d):
+                    # Copy the weight tensor
+                    keep_indices = config['keep_indices']
+                    if 'conv1' in name or name == 'conv1':
+                        # For input conv layers, keep the input channels
+                        if name == 'conv1':
+                            pruned_layer.weight.data = original_layer.weight.data[keep_indices]
+                        else:
+                            pruned_layer.weight.data = original_layer.weight.data[:, keep_indices]
+                    else:
+                        # For other conv layers, keep both input and output channels
+                        pruned_layer.weight.data = original_layer.weight.data[keep_indices][:, keep_indices]
+                    
+                    # Copy bias if it exists
+                    if original_layer.bias is not None and pruned_layer.bias is not None:
+                        pruned_layer.bias.data = original_layer.bias.data[keep_indices]
+                
+                elif isinstance(original_layer, nn.BatchNorm2d) and isinstance(pruned_layer, nn.BatchNorm2d):
+                    # Copy batchnorm parameters
+                    keep_indices = config['keep_indices']
+                    pruned_layer.weight.data = original_layer.weight.data[keep_indices]
+                    pruned_layer.bias.data = original_layer.bias.data[keep_indices]
+                    pruned_layer.running_mean.data = original_layer.running_mean.data[keep_indices]
+                    pruned_layer.running_var.data = original_layer.running_var.data[keep_indices]
+
+    def _get_layer_by_name(self, model, name):
+        """Get a layer by its name (e.g., 'layer1.0.conv1')"""
+        parts = name.split('.')
+        layer = model
+        
+        for part in parts:
+            if part.isdigit():
+                layer = layer[int(part)]
+            else:
+                layer = getattr(layer, part)
+        
+        return layer
+
+    def _validate_model(self):
+        """Validate the pruned model with a dummy input"""
+        dummy = torch.randn(1, 3, 32, 32)
+        try:
+            output = self._pruned_model(dummy)
+            print("✓ Validation passed")
+        except Exception as e:
+            print(f"✗ Validation failed: {str(e)}")
+            raise
+
     def get_params_count(self):
-        """Get parameter counts."""
-        orig = sum(p.numel() for p in self.model.parameters())
-        pruned = sum(p.numel() for p in self.prune().parameters())
-        return orig, pruned
-    
-    def get_flops_count(self, input_size=(1, 3, 32, 32)):
-        """Calculate FLOPs."""
+        """Get the parameter count before and after pruning"""
+        if self._original_params is None:
+            self._original_params = sum(p.numel() for p in self.model.parameters())
+        
+        if self._pruned_params is None:
+            self._pruned_params = sum(p.numel() for p in self._pruned_model.parameters())
+        
+        return self._original_params, self._pruned_params
+
+    def get_flops_count(self):
+        """Get the FLOPs count before and after pruning"""
+        if self._original_flops is None:
+            self._original_flops = self._count_flops(self.model)
+        
+        if self._pruned_flops is None:
+            self._pruned_flops = self._count_flops(self._pruned_model)
+        
+        return self._original_flops, self._pruned_flops
+
+    def _count_flops(self, model):
+        """Count FLOPs for a model"""
         try:
             from thop import profile
-            
-            dummy = torch.randn(input_size)
-            
-            self.model.cpu()
-            orig_flops, _ = profile(self.model, inputs=(dummy,), verbose=False)
-            
-            pruned_model = self.prune()
-            pruned_flops, _ = profile(pruned_model, inputs=(dummy,), verbose=False)
-            
-            return int(orig_flops), int(pruned_flops)
+            dummy = torch.randn(1, 3, 32, 32)
+            flops, _ = profile(model, inputs=(dummy,), verbose=False)
+            return flops
         except ImportError:
-            print("Warning: thop not installed. Cannot calculate FLOPs.")
-            return 0, 0
+            print("Thop not installed. Using simple FLOPs counting.")
+            flops = 0
+            dummy = torch.randn(1, 3, 32, 32)
+            
+            def hook_fn(module, input, output):
+                nonlocal flops
+                if isinstance(module, nn.Conv2d):
+                    # Calculate FLOPs for conv layer
+                    batch_size, input_channels, input_height, input_width = input[0].size()
+                    output_channels, output_height, output_width = output.size()
+                    kernel_ops = module.kernel_size[0] * module.kernel_size[1] * input_channels
+                    flops += kernel_ops * output_height * output_width * output_channels
+                elif isinstance(module, nn.Linear):
+                    # Calculate FLOPs for linear layer
+                    input_size = input[0].size(1)
+                    output_size = output.size(1)
+                    flops += input_size * output_size
+            
+            # Register hooks
+            hooks = []
+            for module in model.modules():
+                if isinstance(module, (nn.Conv2d, nn.Linear)):
+                    hooks.append(module.register_forward_hook(hook_fn))
+            
+            # Forward pass
+            with torch.no_grad():
+                model(dummy)
+            
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
+            
+            return flops
