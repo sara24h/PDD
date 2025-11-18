@@ -344,7 +344,7 @@ class PDDTrainer:
                     print(f"  {layer_name:<35} | "
                           f"Total: {stat['total']:3d} | "
                           f"Kept: {stat['kept']:3d} | "
-                          f"Pruned: {stat['pruned_ratio']*100:5.1f}%")
+                          f"Pruned: {stat['pruning_ratio']*100:5.1f}%")
                 print(f"{'-'*70}")
         
         print(f"\n{'='*70}")
