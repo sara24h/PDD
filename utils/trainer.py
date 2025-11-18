@@ -208,7 +208,7 @@ class PDDTrainer:
                 
                 # Total loss (Equation 4 from paper)
                 # L_total = L(z_s, z_t) + CE(z_s, Y)
-                total_loss = self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss + 0.01 * reg_loss
+                total_loss = self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss + 0.1 * reg_loss
                 
                 # Backward pass
                 total_loss.backward()
