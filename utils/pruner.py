@@ -1,280 +1,295 @@
 import torch
 import torch.nn as nn
-import numpy as np
-from models.resnet import resnet20
+import copy
 
 
 class ModelPruner:
     def __init__(self, model, masks):
+        """
+        Args:
+            model: مدل اصلی (student model)
+            masks: دیکشنری ماسک‌های باینری (0 یا 1) برای هر لایه
+        """
         self.model = model
         self.masks = masks
-        self._pruned_model = None
         self._original_params = None
         self._pruned_params = None
         self._original_flops = None
         self._pruned_flops = None
 
     def prune(self):
-        """Create a pruned model based on masks"""
-        # Create a new model with adjusted architecture
-        self._pruned_model = resnet20(num_classes=10)
+        """
+        حذف کانال‌های redundant بر اساس ماسک‌ها
+        Returns: مدل هرس شده
+        """
+        print("\nAnalyzing masks...")
         
-        # Analyze masks to determine channel counts
-        channel_configs = self._analyze_masks()
+        # تحلیل ماسک‌ها برای یافتن کانال‌هایی که باید نگه داشته شوند
+        keep_indices = {}
+        pruning_stats = {}
         
-        # Build the pruned model
-        self._build_pruned_model(channel_configs)
-        
-        # Copy weights from original model to pruned model
-        self._copy_weights()
-        
-        # Validate the pruned model
-        self._validate_model()
-        
-        return self._pruned_model
-
-    def _analyze_masks(self):
-        """Analyze masks to determine channel counts for each layer"""
-        channel_configs = {}
-        
-        # For each layer, determine which channels to keep
         for name, mask in self.masks.items():
-            # Apply ApproxSign function to get binary mask
-            binary_mask = self._approx_sign(mask)
+            # mask شکل [1, C, 1, 1] دارد
+            mask_flat = mask.squeeze().cpu()
             
-            # Count number of channels to keep
-            keep_channels = int(binary_mask.sum().item())
-            total_channels = mask.shape[1]
+            # پیدا کردن اندیس کانال‌هایی که باید نگه داشته شوند (mask=1)
+            keep_idx = torch.where(mask_flat > 0.5)[0]
+            total_channels = mask_flat.numel()
+            kept_channels = len(keep_idx)
             
-            channel_configs[name] = {
-                'keep_indices': torch.where(binary_mask.squeeze())[0],
-                'keep_count': keep_channels,
-                'total_count': total_channels
+            keep_indices[name] = keep_idx
+            pruning_stats[name] = {
+                'total': total_channels,
+                'kept': kept_channels,
+                'pruned': total_channels - kept_channels,
+                'ratio': (1 - kept_channels / total_channels) * 100
             }
-        
-        return channel_configs
-
-    def _approx_sign(self, x):
-        """Differentiable approximation of sign function from the paper"""
-        result = torch.zeros_like(x)
-        
-        # x < -1
-        mask1 = (x < -1).float()
-        result += mask1 * 0.0
-        
-        # -1 <= x < 0
-        mask2 = ((x >= -1) & (x < 0)).float()
-        result += mask2 * ((x + 1) ** 2 / 2)
-        
-        # 0 <= x < 1
-        mask3 = ((x >= 0) & (x < 1)).float()
-        result += mask3 * (2 * x - x**2 + 1) / 2
-        
-        # x >= 1
-        mask4 = (x >= 1).float()
-        result += mask4 * 1.0
-        
-        return result
-
-    def _build_pruned_model(self, channel_configs):
-        """Build the pruned model with adjusted channel counts"""
-        # Adjust the first convolutional layer
-        conv1_keep_count = channel_configs['conv1']['keep_count']
-        self._pruned_model.conv1 = nn.Conv2d(
-            3, conv1_keep_count, kernel_size=3, stride=1, padding=1, bias=False
-        )
-        self._pruned_model.bn1 = nn.BatchNorm2d(conv1_keep_count)
-        
-        # Adjust each layer
-        self._adjust_layer('layer1', channel_configs, 16)
-        self._adjust_layer('layer2', channel_configs, 32)
-        self._adjust_layer('layer3', channel_configs, 64)
-        
-        # Adjust the final linear layer
-        last_layer_name = 'layer3.2.conv2'
-        last_layer_keep_count = channel_configs[last_layer_name]['keep_count']
-        self._pruned_model.linear = nn.Linear(last_layer_keep_count, 10)
-
-    def _adjust_layer(self, layer_name, channel_configs, base_planes):
-        """Adjust a specific layer (layer1, layer2, or layer3)"""
-        layer = getattr(self._pruned_model, layer_name)
-        blocks = []
-        
-        for i in range(3):  # Each layer has 3 blocks in ResNet20
-            # Get the block from the original model
-            original_block = getattr(self.model, layer_name)[i]
             
-            # Determine input and output channels
-            block_prefix = f"{layer_name}.{i}"
+            print(f"{name:40s} | Total: {total_channels:4d} | "
+                  f"Kept: {kept_channels:4d} | "
+                  f"Pruned: {pruning_stats[name]['ratio']:.2f}%")
+        
+        print("\nBuilding pruned model...")
+        
+        # ساخت مدل جدید با معماری کوچکتر
+        pruned_model = self._build_pruned_model(keep_indices, pruning_stats)
+        
+        print("✓ Pruned model created")
+        
+        # کپی کردن وزن‌ها از مدل اصلی به مدل هرس شده
+        print("\nCopying weights...")
+        self._copy_weights(pruned_model, keep_indices)
+        print("✓ Weights copied")
+        
+        # محاسبه آمار
+        self._calculate_compression_stats(pruned_model)
+        
+        return pruned_model
+
+    def _build_pruned_model(self, keep_indices, stats):
+        """ساخت مدل با کانال‌های کمتر"""
+        from models.resnet import ResNet, BasicBlock
+        
+        # تعداد کانال‌های باقی‌مانده در هر لایه
+        num_classes = self.model.linear.out_features
+        
+        # تعیین تعداد کانال‌ها برای conv1
+        conv1_channels = stats['conv1']['kept'] if 'conv1' in stats else 16
+        
+        # ساخت مدل جدید
+        # برای ResNet20: [3, 3, 3] blocks در هر stage
+        pruned_model = ResNet(BasicBlock, [3, 3, 3], num_classes=num_classes)
+        
+        # تنظیم conv1
+        if 'conv1' in keep_indices:
+            kept = len(keep_indices['conv1'])
+            pruned_model.conv1 = nn.Conv2d(3, kept, kernel_size=3, 
+                                           stride=1, padding=1, bias=False)
+            pruned_model.bn1 = nn.BatchNorm2d(kept)
+        
+        # تنظیم هر stage (layer1, layer2, layer3)
+        prev_channels = conv1_channels
+        
+        for stage_idx, stage_name in enumerate(['layer1', 'layer2', 'layer3']):
+            stage = getattr(pruned_model, stage_name)
             
-            # For the first block in each layer, input channels come from the previous layer
-            if i == 0:
-                if layer_name == 'layer1':
-                    in_channels = channel_configs['conv1']['keep_count']
+            for block_idx in range(len(stage)):
+                block = stage[block_idx]
+                
+                # تعیین stride
+                stride = 2 if (block_idx == 0 and stage_idx > 0) else 1
+                
+                # تعداد کانال‌های ورودی
+                in_channels = prev_channels
+                
+                # تعداد کانال‌های خروجی conv1 در این بلاک
+                conv1_name = f'{stage_name}.{block_idx}.conv1'
+                if conv1_name in keep_indices:
+                    conv1_out = len(keep_indices[conv1_name])
                 else:
-                    # Get the output channels from the last conv of the previous layer
-                    prev_layer_name = 'layer1' if layer_name == 'layer2' else 'layer2'
-                    prev_block_name = f"{prev_layer_name}.2.conv2"
-                    in_channels = channel_configs[prev_block_name]['keep_count']
-            else:
-                # For subsequent blocks, input channels come from the previous block
-                prev_conv_name = f"{block_prefix}.{(i-1) % 3}.conv2"
-                in_channels = channel_configs[prev_conv_name]['keep_count']
-            
-            # Get the output channels for this block
-            conv1_name = f"{block_prefix}.conv1"
-            conv2_name = f"{block_prefix}.conv2"
-            out_channels = channel_configs[conv2_name]['keep_count']
-            
-            # Determine if we need a shortcut
-            stride = 2 if (i == 0 and layer_name != 'layer1') else 1
-            need_shortcut = (stride != 1 or in_channels != out_channels)
-            
-            # Create the block
-            block = self._create_block(in_channels, out_channels, stride, need_shortcut)
-            blocks.append(block)
-        
-        # Replace the layer with the new blocks
-        setattr(self._pruned_model, layer_name, nn.Sequential(*blocks))
-
-    def _create_block(self, in_channels, out_channels, stride, need_shortcut):
-        """Create a BasicBlock with the specified channels"""
-        from models.resnet import BasicBlock
-        block = BasicBlock(in_channels, out_channels, stride)
-        
-        # Adjust the conv layers
-        block.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
-                                stride=stride, padding=1, bias=False)
-        block.bn1 = nn.BatchNorm2d(out_channels)
-        block.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, 
-                                stride=1, padding=1, bias=False)
-        block.bn2 = nn.BatchNorm2d(out_channels)
-        
-        # Adjust the shortcut if needed
-        if need_shortcut:
-            block.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, 
-                         stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels)
-            )
-        
-        return block
-
-    def _copy_weights(self):
-        """Copy weights from the original model to the pruned model"""
-        # Copy weights for each layer based on the keep indices
-        for name, config in self._analyze_masks().items():
-            if name in self.masks:
-                # Get the original and pruned layers
-                original_layer = self._get_layer_by_name(self.model, name)
-                pruned_layer = self._get_layer_by_name(self._pruned_model, name)
+                    conv1_out = block.conv1.out_channels
                 
-                if isinstance(original_layer, nn.Conv2d) and isinstance(pruned_layer, nn.Conv2d):
-                    # Copy the weight tensor
-                    keep_indices = config['keep_indices']
-                    if 'conv1' in name or name == 'conv1':
-                        # For input conv layers, keep the input channels
-                        if name == 'conv1':
-                            pruned_layer.weight.data = original_layer.weight.data[keep_indices]
-                        else:
-                            pruned_layer.weight.data = original_layer.weight.data[:, keep_indices]
-                    else:
-                        # For other conv layers, keep both input and output channels
-                        pruned_layer.weight.data = original_layer.weight.data[keep_indices][:, keep_indices]
+                # تعداد کانال‌های خروجی conv2 در این بلاک
+                conv2_name = f'{stage_name}.{block_idx}.conv2'
+                if conv2_name in keep_indices:
+                    conv2_out = len(keep_indices[conv2_name])
+                else:
+                    conv2_out = block.conv2.out_channels
+                
+                # تنظیم conv1
+                block.conv1 = nn.Conv2d(in_channels, conv1_out, 
+                                       kernel_size=3, stride=stride, 
+                                       padding=1, bias=False)
+                block.bn1 = nn.BatchNorm2d(conv1_out)
+                
+                # تنظیم conv2
+                block.conv2 = nn.Conv2d(conv1_out, conv2_out, 
+                                       kernel_size=3, stride=1, 
+                                       padding=1, bias=False)
+                block.bn2 = nn.BatchNorm2d(conv2_out)
+                
+                # تنظیم shortcut در صورت نیاز
+                if stride != 1 or in_channels != conv2_out:
+                    block.shortcut = nn.Sequential(
+                        nn.Conv2d(in_channels, conv2_out, 
+                                 kernel_size=1, stride=stride, bias=False),
+                        nn.BatchNorm2d(conv2_out)
+                    )
+                else:
+                    block.shortcut = nn.Sequential()
+                
+                # به‌روزرسانی prev_channels برای بلاک بعدی
+                prev_channels = conv2_out
+        
+        # تنظیم linear layer نهایی
+        pruned_model.linear = nn.Linear(prev_channels, num_classes)
+        
+        return pruned_model
+
+    def _copy_weights(self, pruned_model, keep_indices):
+        """کپی کردن وزن‌ها از مدل اصلی به مدل هرس شده"""
+        
+        # کپی conv1
+        if 'conv1' in keep_indices:
+            idx = keep_indices['conv1']
+            # فقط کانال‌های خروجی را نگه می‌داریم
+            pruned_model.conv1.weight.data = \
+                self.model.conv1.weight.data[idx, :, :, :]
+            pruned_model.bn1.weight.data = self.model.bn1.weight.data[idx]
+            pruned_model.bn1.bias.data = self.model.bn1.bias.data[idx]
+            pruned_model.bn1.running_mean.data = self.model.bn1.running_mean.data[idx]
+            pruned_model.bn1.running_var.data = self.model.bn1.running_var.data[idx]
+        
+        # کپی stages
+        for stage_name in ['layer1', 'layer2', 'layer3']:
+            orig_stage = getattr(self.model, stage_name)
+            pruned_stage = getattr(pruned_model, stage_name)
+            
+            for block_idx in range(len(orig_stage)):
+                orig_block = orig_stage[block_idx]
+                pruned_block = pruned_stage[block_idx]
+                
+                # کپی conv1
+                conv1_name = f'{stage_name}.{block_idx}.conv1'
+                if conv1_name in keep_indices:
+                    out_idx = keep_indices[conv1_name]
                     
-                    # Copy bias if it exists
-                    if original_layer.bias is not None and pruned_layer.bias is not None:
-                        pruned_layer.bias.data = original_layer.bias.data[keep_indices]
+                    # پیدا کردن in_channels
+                    if block_idx == 0:
+                        if stage_name == 'layer1':
+                            in_idx = keep_indices.get('conv1', 
+                                     torch.arange(orig_block.conv1.in_channels))
+                        else:
+                            prev_stage = 'layer1' if stage_name == 'layer2' else 'layer2'
+                            prev_conv_name = f'{prev_stage}.2.conv2'
+                            in_idx = keep_indices.get(prev_conv_name,
+                                     torch.arange(orig_block.conv1.in_channels))
+                    else:
+                        prev_conv_name = f'{stage_name}.{block_idx-1}.conv2'
+                        in_idx = keep_indices.get(prev_conv_name,
+                                 torch.arange(orig_block.conv1.in_channels))
+                    
+                    # کپی وزن conv1
+                    pruned_block.conv1.weight.data = \
+                        orig_block.conv1.weight.data[out_idx, :, :, :][:, in_idx, :, :]
+                    pruned_block.bn1.weight.data = orig_block.bn1.weight.data[out_idx]
+                    pruned_block.bn1.bias.data = orig_block.bn1.bias.data[out_idx]
+                    pruned_block.bn1.running_mean.data = orig_block.bn1.running_mean.data[out_idx]
+                    pruned_block.bn1.running_var.data = orig_block.bn1.running_var.data[out_idx]
                 
-                elif isinstance(original_layer, nn.BatchNorm2d) and isinstance(pruned_layer, nn.BatchNorm2d):
-                    # Copy batchnorm parameters
-                    keep_indices = config['keep_indices']
-                    pruned_layer.weight.data = original_layer.weight.data[keep_indices]
-                    pruned_layer.bias.data = original_layer.bias.data[keep_indices]
-                    pruned_layer.running_mean.data = original_layer.running_mean.data[keep_indices]
-                    pruned_layer.running_var.data = original_layer.running_var.data[keep_indices]
-
-    def _get_layer_by_name(self, model, name):
-        """Get a layer by its name (e.g., 'layer1.0.conv1')"""
-        parts = name.split('.')
-        layer = model
+                # کپی conv2
+                conv2_name = f'{stage_name}.{block_idx}.conv2'
+                if conv2_name in keep_indices:
+                    out_idx = keep_indices[conv2_name]
+                    in_idx = keep_indices.get(conv1_name,
+                             torch.arange(orig_block.conv2.in_channels))
+                    
+                    pruned_block.conv2.weight.data = \
+                        orig_block.conv2.weight.data[out_idx, :, :, :][:, in_idx, :, :]
+                    pruned_block.bn2.weight.data = orig_block.bn2.weight.data[out_idx]
+                    pruned_block.bn2.bias.data = orig_block.bn2.bias.data[out_idx]
+                    pruned_block.bn2.running_mean.data = orig_block.bn2.running_mean.data[out_idx]
+                    pruned_block.bn2.running_var.data = orig_block.bn2.running_var.data[out_idx]
+                
+                # کپی shortcut
+                if len(orig_block.shortcut) > 0:
+                    for i, layer in enumerate(orig_block.shortcut):
+                        if isinstance(layer, nn.Conv2d):
+                            # پیدا کردن in_idx و out_idx برای shortcut
+                            if block_idx == 0:
+                                if stage_name == 'layer1':
+                                    in_idx = keep_indices.get('conv1',
+                                             torch.arange(layer.in_channels))
+                                else:
+                                    prev_stage = 'layer1' if stage_name == 'layer2' else 'layer2'
+                                    prev_conv_name = f'{prev_stage}.2.conv2'
+                                    in_idx = keep_indices.get(prev_conv_name,
+                                             torch.arange(layer.in_channels))
+                            else:
+                                prev_conv_name = f'{stage_name}.{block_idx-1}.conv2'
+                                in_idx = keep_indices.get(prev_conv_name,
+                                         torch.arange(layer.in_channels))
+                            
+                            out_idx = keep_indices.get(conv2_name,
+                                      torch.arange(layer.out_channels))
+                            
+                            pruned_block.shortcut[i].weight.data = \
+                                layer.weight.data[out_idx, :, :, :][:, in_idx, :, :]
+                        
+                        elif isinstance(layer, nn.BatchNorm2d):
+                            out_idx = keep_indices.get(conv2_name,
+                                      torch.arange(layer.num_features))
+                            pruned_block.shortcut[i].weight.data = layer.weight.data[out_idx]
+                            pruned_block.shortcut[i].bias.data = layer.bias.data[out_idx]
+                            pruned_block.shortcut[i].running_mean.data = layer.running_mean.data[out_idx]
+                            pruned_block.shortcut[i].running_var.data = layer.running_var.data[out_idx]
         
-        for part in parts:
-            if part.isdigit():
-                layer = layer[int(part)]
-            else:
-                layer = getattr(layer, part)
-        
-        return layer
+        # کپی linear layer
+        last_stage_last_block = f'layer3.2.conv2'
+        if last_stage_last_block in keep_indices:
+            in_idx = keep_indices[last_stage_last_block]
+            pruned_model.linear.weight.data = \
+                self.model.linear.weight.data[:, in_idx]
+            pruned_model.linear.bias.data = self.model.linear.bias.data
 
-    def _validate_model(self):
-        """Validate the pruned model with a dummy input"""
-        dummy = torch.randn(1, 3, 32, 32)
-        try:
-            output = self._pruned_model(dummy)
-            print("✓ Validation passed")
-        except Exception as e:
-            print(f"✗ Validation failed: {str(e)}")
-            raise
+    def _calculate_compression_stats(self, pruned_model):
+        """محاسبه آمار فشرده‌سازی"""
+        self._original_params = sum(p.numel() for p in self.model.parameters())
+        self._pruned_params = sum(p.numel() for p in pruned_model.parameters())
+        
+        # تخمین FLOPs
+        self._original_flops = self._estimate_flops(self.model)
+        self._pruned_flops = self._estimate_flops(pruned_model)
+
+    def _estimate_flops(self, model):
+        """تخمین FLOPs برای یک مدل"""
+        flops = 0
+        
+        def count_conv_flops(layer, input_size):
+            # FLOPs = 2 × C_in × K_h × K_w × H_out × W_out × C_out
+            h_out, w_out = input_size[2], input_size[3]
+            kernel_ops = layer.kernel_size[0] * layer.kernel_size[1] * layer.in_channels
+            output_elements = h_out * w_out * layer.out_channels
+            return 2 * kernel_ops * output_elements
+        
+        def count_linear_flops(layer):
+            return 2 * layer.in_features * layer.out_features
+        
+        # تخمین ساده بر اساس لایه‌های Conv و Linear
+        input_size = [1, 3, 32, 32]  # CIFAR-10
+        
+        for module in model.modules():
+            if isinstance(module, nn.Conv2d):
+                flops += count_conv_flops(module, input_size)
+            elif isinstance(module, nn.Linear):
+                flops += count_linear_flops(module)
+        
+        return flops
 
     def get_params_count(self):
-        """Get the parameter count before and after pruning"""
-        if self._original_params is None:
-            self._original_params = sum(p.numel() for p in self.model.parameters())
-        
-        if self._pruned_params is None:
-            self._pruned_params = sum(p.numel() for p in self._pruned_model.parameters())
-        
+
         return self._original_params, self._pruned_params
 
     def get_flops_count(self):
-        """Get the FLOPs count before and after pruning"""
-        if self._original_flops is None:
-            self._original_flops = self._count_flops(self.model)
-        
-        if self._pruned_flops is None:
-            self._pruned_flops = self._count_flops(self._pruned_model)
-        
-        return self._original_flops, self._pruned_flops
 
-    def _count_flops(self, model):
-        """Count FLOPs for a model"""
-        try:
-            from thop import profile
-            dummy = torch.randn(1, 3, 32, 32)
-            flops, _ = profile(model, inputs=(dummy,), verbose=False)
-            return flops
-        except ImportError:
-            print("Thop not installed. Using simple FLOPs counting.")
-            flops = 0
-            dummy = torch.randn(1, 3, 32, 32)
-            
-            def hook_fn(module, input, output):
-                nonlocal flops
-                if isinstance(module, nn.Conv2d):
-                    # Calculate FLOPs for conv layer
-                    batch_size, input_channels, input_height, input_width = input[0].size()
-                    output_channels, output_height, output_width = output.size()
-                    kernel_ops = module.kernel_size[0] * module.kernel_size[1] * input_channels
-                    flops += kernel_ops * output_height * output_width * output_channels
-                elif isinstance(module, nn.Linear):
-                    # Calculate FLOPs for linear layer
-                    input_size = input[0].size(1)
-                    output_size = output.size(1)
-                    flops += input_size * output_size
-            
-            # Register hooks
-            hooks = []
-            for module in model.modules():
-                if isinstance(module, (nn.Conv2d, nn.Linear)):
-                    hooks.append(module.register_forward_hook(hook_fn))
-            
-            # Forward pass
-            with torch.no_grad():
-                model(dummy)
-            
-            # Remove hooks
-            for hook in hooks:
-                hook.remove()
-            
-            return flops
+        return self._original_flops, self._pruned_flops
