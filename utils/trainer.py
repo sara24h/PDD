@@ -231,19 +231,16 @@ class PDDTrainer:
             
             # Update learning rate
             self.scheduler.step()
-            
-            # Calculate pruning ratio
+
             pruning_ratio = self._calculate_pruning_ratio()
             
-            # Print statistics every epoch or every 5 epochs
-            if (epoch + 1) % 5 == 0 or epoch == 0:
-                print(f"\nEpoch [{epoch+1}/{self.args.epochs}]")
-                print(f"Train: Loss={train_loss/len(self.train_loader):.4f}, Acc={train_acc:.2f}%")
-                print(f"Test:  Acc={test_acc:.2f}%")
-                print(f"Losses: KD={kd_loss_total/len(self.train_loader):.4f}, "
-                      f"CE={ce_loss_total/len(self.train_loader):.4f}, "
-                      f"Reg={reg_loss_total/len(self.train_loader):.6f}")
-                print(f"Pruning Ratio: {pruning_ratio:.2f}%")
+            print(f"\nEpoch [{epoch+1}/{self.args.epochs}]")
+            print(f"Train: Loss={train_loss/len(self.train_loader):.4f}, Acc={train_acc:.2f}%")
+            print(f"Test:  Acc={test_acc:.2f}%")
+            print(f"Losses: KD={kd_loss_total/len(self.train_loader):.4f}, "
+                f"CE={ce_loss_total/len(self.train_loader):.4f}, "
+                f"Reg={reg_loss_total/len(self.train_loader):.6f}")
+            print(f"Pruning Ratio: {pruning_ratio:.2f}%")
             
             # Save best model
             if test_acc > self.best_acc:
