@@ -2,11 +2,94 @@ import torch
 import torch.nn as nn
 import argparse
 import os
+import urllib.request
 from utils.data_loader import get_cifar10_dataloaders
 from models.resnet import resnet20, resnet56
 from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
+
+
+def download_teacher_checkpoint(checkpoint_path):
+    """Download pretrained ResNet56 if not exists"""
+    if os.path.exists(checkpoint_path):
+        print(f"✓ Checkpoint found at {checkpoint_path}")
+        return True
+    
+    print(f"✗ Checkpoint not found at {checkpoint_path}")
+    print("Downloading pretrained ResNet56 from GitHub...")
+    
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+    
+    urls = [
+        'https://github.com/chenyaofo/pytorch-cifar-models/releases/download/resnet/cifar10_resnet56-187c023a.pt',
+        'https://github.com/huyvnphan/PyTorch_CIFAR10/releases/download/v3.0.0/resnet56-10b9e6fd.pt'
+    ]
+    
+    for url in urls:
+        try:
+            print(f"Trying: {url}")
+            urllib.request.urlretrieve(url, checkpoint_path)
+            
+            # Verify
+            torch.load(checkpoint_path, map_location='cpu')
+            print(f"✓ Successfully downloaded to {checkpoint_path}")
+            return True
+            
+        except Exception as e:
+            print(f"✗ Failed: {str(e)}")
+            if os.path.exists(checkpoint_path):
+                os.remove(checkpoint_path)
+    
+    return False
+
+
+def load_teacher_model(teacher, checkpoint_path, device):
+    """Load teacher model with flexible key mapping"""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict):
+        if 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        elif 'model' in checkpoint:
+            state_dict = checkpoint['model']
+        elif 'net' in checkpoint:
+            state_dict = checkpoint['net']
+        else:
+            state_dict = checkpoint
+    else:
+        state_dict = checkpoint
+    
+    # Key conversion mapping
+    key_mapping = {
+        'fc.': 'linear.',
+        'downsample.': 'shortcut.',
+        'module.': '',  # Remove module. prefix if exists
+    }
+    
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k
+        for old, new in key_mapping.items():
+            new_k = new_k.replace(old, new)
+        new_state_dict[new_k] = v
+    
+    # Try to load
+    try:
+        teacher.load_state_dict(new_state_dict, strict=True)
+        print("✓ Teacher loaded (strict)")
+    except Exception as e:
+        print(f"⚠ Strict loading failed: {str(e)}")
+        print("Trying non-strict loading...")
+        missing, unexpected = teacher.load_state_dict(new_state_dict, strict=False)
+        if missing:
+            print(f"Missing keys: {missing[:5]}...")
+        if unexpected:
+            print(f"Unexpected keys: {unexpected[:5]}...")
+        print("✓ Teacher loaded (non-strict)")
+    
+    return teacher
 
 
 def parse_args():
@@ -20,6 +103,8 @@ def parse_args():
     # Model
     parser.add_argument('--teacher_checkpoint', type=str, 
                         default='checkpoints/resnet56_cifar10.pth')
+    parser.add_argument('--download_teacher', action='store_true', default=True,
+                        help='Auto-download teacher checkpoint if not found')
     
     # Training (matching paper: 50 epochs for distillation)
     parser.add_argument('--epochs', type=int, default=50)
@@ -55,32 +140,44 @@ def main():
     print(f"Device: {device}")
     
     # Load data
-    print("Loading CIFAR10...")
+    print("\nLoading CIFAR10...")
     train_loader, test_loader = get_cifar10_dataloaders(
         args.data_dir, args.batch_size, args.num_workers
     )
     
     # Create models
-    print("Creating models...")
+    print("\nCreating models...")
     student = resnet20(num_classes=10).to(device)
     teacher = resnet56(num_classes=10).to(device)
     
+    # Download teacher checkpoint if needed
+    if args.download_teacher:
+        if not download_teacher_checkpoint(args.teacher_checkpoint):
+            print("\n⚠ ERROR: Could not download teacher checkpoint!")
+            print("Please download manually from:")
+            print("https://github.com/chenyaofo/pytorch-cifar-models")
+            return
+    
     # Load teacher
-    checkpoint = torch.load(args.teacher_checkpoint, map_location=device)
-    if 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-    
-    # Convert keys if needed
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        k = k.replace('fc.', 'linear.').replace('downsample.', 'shortcut.')
-        new_state_dict[k] = v
-    
-    teacher.load_state_dict(new_state_dict, strict=False)
+    print("\nLoading teacher model...")
+    teacher = load_teacher_model(teacher, args.teacher_checkpoint, device)
     teacher.eval()
-    print("✓ Teacher loaded")
+    
+    # Evaluate teacher
+    print("\nEvaluating teacher model...")
+    teacher.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, targets in test_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = teacher(inputs)
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+    
+    teacher_acc = 100. * correct / total
+    print(f"Teacher Accuracy: {teacher_acc:.2f}%")
     
     # Phase 1: Pruning During Distillation
     print("\n" + "="*70)
@@ -167,7 +264,7 @@ def main():
         correct = 0
         total = 0
         
-        with torch.no_grad():
+        with torch.no_dict():
             for inputs, targets in test_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                 outputs = pruned_student(inputs)
@@ -201,6 +298,7 @@ def main():
     print("\n" + "="*70)
     print("FINAL RESULTS")
     print("="*70)
+    print(f"Teacher Accuracy: {teacher_acc:.2f}%")
     print(f"Best Test Accuracy: {best_acc:.2f}%")
     print(f"Parameters Reduction: {params_red:.2f}%")
     print(f"FLOPs Reduction: {flops_red:.2f}%")
