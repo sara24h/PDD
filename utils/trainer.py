@@ -37,19 +37,19 @@ class PDDTrainer:
         self.current_epoch = 0
     
     def _initialize_masks(self):
-        """
-        Initialize learnable masks for convolutional layers.
-        Paper says: "we randomly initialized each mask x_i"
-        """
+  
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # Random initialization around 0 (uniform distribution [-1, 1])
-                # This gives approximately 50% chance of each channel being kept/pruned
+            # Random initialization around 0 (uniform distribution [-1, 1])
+            # This gives approximately 50% chance of each channel being kept/pruned
                 mask = nn.Parameter(torch.rand(1, module.out_channels, 1, 1) * 2 - 1)
-                self.masks[name] = mask
-                mask.to(self.device)
+            # تغییر اینجا: مستقیماً تنسور را به دستگاه مورد نظر منتقل کنید
+                self.masks[name] = mask.to(self.device) # <-- اینطوری درست می‌شود
         
-        print(f"Initialized {len(self.masks)} learnable masks")
+        # اگر دستگاه مدل تغییر کند، باید ماسک‌ها هم تغییر کنند. پس ممکن است بخواهید اطمینان حاصل کنید
+        # که ماسک‌ها همیشه روی همان دستگاهی هستند که مدل است. اما در این حالت، دستگاه ثابت است.
+        
+    print(f"Initialized {len(self.masks)} learnable masks")
     
     def approx_sign(self, x):
         """
