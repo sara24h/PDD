@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 
 class BasicBlock(nn.Module):
+    """Basic Block for ResNet on CIFAR10."""
     expansion = 1
 
     def __init__(self, in_planes, planes, stride=1):
@@ -32,6 +33,8 @@ class BasicBlock(nn.Module):
 
 
 class ResNet(nn.Module):
+    """ResNet for CIFAR10."""
+    
     def __init__(self, block, num_blocks, num_classes=10):
         super(ResNet, self).__init__()
         self.in_planes = 16
@@ -56,19 +59,17 @@ class ResNet(nn.Module):
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
-        out = F.avg_pool2d(out, out.size()[3])
+        out = F.avg_pool2d(out, 8)
         out = out.view(out.size(0), -1)
         out = self.linear(out)
         return out
 
 
 def resnet20(num_classes=10):
+    """ResNet20 for CIFAR10."""
     return ResNet(BasicBlock, [3, 3, 3], num_classes=num_classes)
 
 
 def resnet56(num_classes=10):
+    """ResNet56 for CIFAR10."""
     return ResNet(BasicBlock, [9, 9, 9], num_classes=num_classes)
-
-
-def resnet110(num_classes=10):
-    return ResNet(BasicBlock, [18, 18, 18], num_classes=num_classes)
