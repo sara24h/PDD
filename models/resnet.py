@@ -16,27 +16,22 @@ class BasicBlock(nn.Module):
                                padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
         
-        # تغییر از shortcut به downsample
-        self.downsample = None
+        # استفاده از shortcut (سازگار با trainer.py و pruner.py)
+        self.shortcut = nn.Sequential()
         if stride != 1 or in_planes != self.expansion * planes:
-            self.downsample = nn.Sequential(
+            self.shortcut = nn.Sequential(
                 nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, 
                          stride=stride, bias=False),
                 nn.BatchNorm2d(self.expansion * planes)
             )
     
     def forward(self, x):
-        identity = x
-        
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        
-        if self.downsample is not None:
-            identity = self.downsample(x)
-            
-        out += identity
+        out += self.shortcut(x)
         out = F.relu(out)
         return out
+
 
 class ResNet(nn.Module):
     """ResNet for CIFAR10."""
@@ -51,8 +46,8 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 32, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 64, num_blocks[2], stride=2)
         
-        # تغییر از linear به fc
-        self.fc = nn.Linear(64 * block.expansion, num_classes)
+        # استفاده از linear (سازگار با checkpoint از GitHub)
+        self.linear = nn.Linear(64 * block.expansion, num_classes)
     
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
@@ -69,7 +64,7 @@ class ResNet(nn.Module):
         out = self.layer3(out)
         out = F.avg_pool2d(out, 8)
         out = out.view(out.size(0), -1)
-        out = self.fc(out)  # تغییر از linear به fc
+        out = self.linear(out)
         return out
 
 
