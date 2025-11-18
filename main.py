@@ -286,9 +286,9 @@ def main():
         
         test_acc = 100. * correct / total
         
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch [{epoch+1}/{args.finetune_epochs}] "
-                  f"Train: {train_acc:.2f}% | Test: {test_acc:.2f}%")
+        
+        print(f"Epoch [{epoch+1}/{args.finetune_epochs}] "
+            f"Train: {train_acc:.2f}% | Test: {test_acc:.2f}%")
         
         if test_acc > best_acc:
             best_acc = test_acc
