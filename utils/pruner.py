@@ -5,13 +5,10 @@ from models.resnet import resnet20
 
 def create_pruned_resnet20(original_model, masks, threshold=0.5):
     """
-    Create pruned ResNet20 following paper methodology.
+    Create pruned ResNet20 following PDD paper methodology.
     
-    Critical fixes:
-    1. For blocks with identity shortcuts (blocks 1-2 in each layer),
-       we ensure conv2 output matches conv1 input for dimension compatibility
-    2. First block of each layer has projection shortcut (can prune freely)
-    3. Masks are applied independently during training, constraints only at pruning
+    Key fix: Ensures identity shortcut dimension compatibility by forcing
+    conv2 output channels to match the block input channels.
     """
     
     # Create new model
@@ -32,6 +29,8 @@ def create_pruned_resnet20(original_model, masks, threshold=0.5):
     print("\nPhase 1: Analyzing masks...")
     print("-"*70)
     
+    # First pass: collect all masks
+    temp_channel_map = {}
     for name, module in original_model.named_modules():
         if not isinstance(module, nn.Conv2d):
             continue
@@ -43,40 +42,58 @@ def create_pruned_resnet20(original_model, masks, threshold=0.5):
             # Ensure at least 1 channel
             if len(keep_idx) == 0:
                 keep_idx = torch.tensor([0])
-            
-            # Special handling for conv2 with identity shortcut
-            if 'conv2' in name and 'layer' in name:
-                parts = name.split('.')
-                layer_name = parts[0]
-                block_idx = int(parts[1])
-                
-                # Blocks 1-2 have identity shortcut
-                if block_idx > 0:
-                    # Get input channels (from conv1 or previous block)
-                    if block_idx == 1:
-                        # First block after downsample
-                        input_name = f'{layer_name}.0.conv2'
-                    else:
-                        input_name = f'{layer_name}.{block_idx-1}.conv2'
-                    
-                    if input_name in channel_map:
-                        expected_channels = len(channel_map[input_name])
-                        
-                        # Adjust keep_idx to match input dimensions
-                        if len(keep_idx) > expected_channels:
-                            keep_idx = keep_idx[:expected_channels]
-                        elif len(keep_idx) < expected_channels:
-                            # Duplicate channels to match
-                            diff = expected_channels - len(keep_idx)
-                            keep_idx = torch.cat([keep_idx, keep_idx[:diff]])
-                        
-                        print(f"  🔧 {name:<35} | Adjusted to {len(keep_idx)} channels (identity)")
-            
-            kept_pct = len(keep_idx) / module.out_channels * 100
-            print(f"  ✓ {name:<35} | {module.out_channels:3d} → {len(keep_idx):3d} ({kept_pct:5.1f}%)")
         else:
             keep_idx = torch.arange(module.out_channels)
-            print(f"  - {name:<35} | {module.out_channels:3d} (no mask)")
+        
+        temp_channel_map[name] = keep_idx
+    
+    # Second pass: adjust for identity shortcuts
+    for name, module in original_model.named_modules():
+        if not isinstance(module, nn.Conv2d):
+            continue
+        
+        keep_idx = temp_channel_map[name].clone()
+        
+        # Special handling for blocks with identity shortcut
+        if 'conv2' in name and 'layer' in name:
+            parts = name.split('.')
+            layer_name = parts[0]  # e.g., 'layer1'
+            block_idx = int(parts[1])  # e.g., 0, 1, 2
+            
+            # Determine if this block has identity shortcut
+            shortcut_name = f'{layer_name}.{block_idx}.shortcut.0'
+            has_projection = shortcut_name in temp_channel_map
+            
+            if not has_projection:
+                # Identity shortcut: conv2 output must match block input
+                if block_idx == 0:
+                    # First block in layer: input from previous layer or conv1
+                    if layer_name == 'layer1':
+                        input_name = 'conv1'
+                    else:
+                        prev_layer = f'layer{int(layer_name[-1])-1}'
+                        input_name = f'{prev_layer}.2.conv2'
+                else:
+                    # Later blocks: input from previous block's conv2
+                    input_name = f'{layer_name}.{block_idx-1}.conv2'
+                
+                if input_name in temp_channel_map:
+                    expected_channels = len(temp_channel_map[input_name])
+                    
+                    # Force conv2 to have same number of channels as input
+                    if len(keep_idx) != expected_channels:
+                        # Take top-k channels or pad if needed
+                        if len(keep_idx) > expected_channels:
+                            keep_idx = keep_idx[:expected_channels]
+                        else:
+                            # Repeat channels to match
+                            needed = expected_channels - len(keep_idx)
+                            keep_idx = torch.cat([keep_idx, keep_idx[:needed]])
+                        
+                        print(f"  🔧 {name:<35} | Adjusted to {len(keep_idx)} channels (identity constraint)")
+        
+        kept_pct = len(keep_idx) / module.out_channels * 100
+        print(f"  ✓ {name:<35} | {module.out_channels:3d} → {len(keep_idx):3d} ({kept_pct:5.1f}%)")
         
         channel_map[name] = keep_idx
     
@@ -246,14 +263,18 @@ class ModelPruner:
     
     def get_flops_count(self, input_size=(1, 3, 32, 32)):
         """Calculate FLOPs."""
-        from thop import profile
-        
-        dummy = torch.randn(input_size)
-        
-        self.model.cpu()
-        orig_flops, _ = profile(self.model, inputs=(dummy,), verbose=False)
-        
-        pruned_model = self.prune()
-        pruned_flops, _ = profile(pruned_model, inputs=(dummy,), verbose=False)
-        
-        return int(orig_flops), int(pruned_flops)
+        try:
+            from thop import profile
+            
+            dummy = torch.randn(input_size)
+            
+            self.model.cpu()
+            orig_flops, _ = profile(self.model, inputs=(dummy,), verbose=False)
+            
+            pruned_model = self.prune()
+            pruned_flops, _ = profile(pruned_model, inputs=(dummy,), verbose=False)
+            
+            return int(orig_flops), int(pruned_flops)
+        except ImportError:
+            print("Warning: thop not installed. Cannot calculate FLOPs.")
+            return 0, 0
