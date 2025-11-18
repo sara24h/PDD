@@ -3,14 +3,16 @@ import torch.nn as nn
 
 
 class ModelPruner:
-    def __init__(self, model, masks):
+    def __init__(self, model, masks, threshold=0.0):
         """
         Args:
             model: مدل اصلی (student model)
-            masks: دیکشنری ماسک‌های باینری (0 یا 1) برای هر لایه
+            masks: دیکشنری ماسک‌ها (مقادیر بین 0 و 1) برای هر لایه
+            threshold: آستانه برای pruning (paper: 0.0 = score of 0 means prune)
         """
         self.model = model
         self.masks = masks
+        self.threshold = threshold
         self._original_params = None
         self._pruned_params = None
         self._original_flops = None
@@ -26,7 +28,7 @@ class ModelPruner:
         # Conv1: 3x3 conv, stride=1, input=32x32
         layer = model.conv1
         h_out, w_out = h, w  # stride=1, padding=1
-        # فرمول صحیح: K^2 * C_in * H_out * W_out * C_out
+        # فرمول: K^2 * C_in * H_out * W_out * C_out
         flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
                  h_out * w_out * layer.out_channels)
         total_flops += flops
@@ -93,21 +95,26 @@ class ModelPruner:
         total_flops += current_h * current_w * model.linear.in_features
         
         # Linear layer: 2 * in_features * out_features
-        # (ضرب و جمع برای هر خروجی)
         total_flops += 2 * model.linear.in_features * model.linear.out_features
         
         return total_flops
 
     def prune(self):
-        """حذف کانال‌های redundant بر اساس ماسک‌ها"""
-        print("\nAnalyzing masks...")
+        """
+        حذف کانال‌های redundant بر اساس ماسک‌ها
+        
+        Paper: "a score of 0 indicates that the channel is redundant and can be pruned"
+        Therefore: channels with mask value <= threshold are pruned
+        """
+        print(f"\nAnalyzing masks (threshold={self.threshold})...")
         
         keep_indices = {}
         pruning_stats = {}
         
         for name, mask in self.masks.items():
             mask_flat = mask.squeeze().cpu()
-            keep_idx = torch.where(mask_flat > 0.5)[0]
+            # Paper: score > threshold → keep, score <= threshold → prune
+            keep_idx = torch.where(mask_flat > self.threshold)[0]
             total_channels = mask_flat.numel()
             kept_channels = len(keep_idx)
             
