@@ -257,39 +257,100 @@ class ModelPruner:
         self._original_params = sum(p.numel() for p in self.model.parameters())
         self._pruned_params = sum(p.numel() for p in pruned_model.parameters())
         
-        # تخمین FLOPs
-        self._original_flops = self._estimate_flops(self.model)
-        self._pruned_flops = self._estimate_flops(pruned_model)
+        # محاسبه دقیق FLOPs
+        self._original_flops = self._calculate_flops(self.model)
+        self._pruned_flops = self._calculate_flops(pruned_model)
 
-    def _estimate_flops(self, model):
-        """تخمین FLOPs برای یک مدل"""
-        flops = 0
+    def _calculate_flops(self, model):
+        """محاسبه دقیق FLOPs برای ResNet روی CIFAR-10"""
+        total_flops = 0
         
-        def count_conv_flops(layer, input_size):
-            # FLOPs = 2 × C_in × K_h × K_w × H_out × W_out × C_out
-            h_out, w_out = input_size[2], input_size[3]
-            kernel_ops = layer.kernel_size[0] * layer.kernel_size[1] * layer.in_channels
-            output_elements = h_out * w_out * layer.out_channels
-            return 2 * kernel_ops * output_elements
+        # برای CIFAR-10: input size = 32x32
+        h, w = 32, 32
         
-        def count_linear_flops(layer):
-            return 2 * layer.in_features * layer.out_features
+        # Conv1: 3x3 conv, stride=1, input=32x32
+        layer = model.conv1
+        h_out, w_out = h, w  # stride=1, padding=1
+        flops = 2 * layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * \
+                h_out * w_out * layer.out_channels
+        total_flops += flops
         
-        # تخمین ساده بر اساس لایه‌های Conv و Linear
-        input_size = [1, 3, 32, 32]  # CIFAR-10
+        # BN1: 2 operations per element (mean and variance)
+        total_flops += 2 * model.bn1.num_features * h_out * w_out
         
-        for module in model.modules():
-            if isinstance(module, nn.Conv2d):
-                flops += count_conv_flops(module, input_size)
-            elif isinstance(module, nn.Linear):
-                flops += count_linear_flops(module)
+        # ReLU: 1 operation per element
+        total_flops += h_out * w_out * model.bn1.num_features
         
-        return flops
+        # به‌روزرسانی spatial size
+        current_h, current_w = h_out, w_out
+        
+        # پردازش هر stage
+        for stage_name in ['layer1', 'layer2', 'layer3']:
+            stage = getattr(model, stage_name)
+            
+            for block_idx, block in enumerate(stage):
+                # تعیین stride
+                stride = block.conv1.stride[0]
+                
+                # Conv1 of block
+                layer = block.conv1
+                h_out = (current_h + 2 * layer.padding[0] - layer.kernel_size[0]) // stride + 1
+                w_out = (current_w + 2 * layer.padding[1] - layer.kernel_size[1]) // stride + 1
+                
+                flops = 2 * layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * \
+                        h_out * w_out * layer.out_channels
+                total_flops += flops
+                
+                # BN + ReLU
+                total_flops += 2 * block.bn1.num_features * h_out * w_out
+                total_flops += h_out * w_out * block.bn1.num_features
+                
+                # به‌روزرسانی spatial size
+                current_h, current_w = h_out, w_out
+                
+                # Conv2 of block
+                layer = block.conv2
+                h_out = (current_h + 2 * layer.padding[0] - layer.kernel_size[0]) // layer.stride[0] + 1
+                w_out = (current_w + 2 * layer.padding[1] - layer.kernel_size[1]) // layer.stride[1] + 1
+                
+                flops = 2 * layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * \
+                        h_out * w_out * layer.out_channels
+                total_flops += flops
+                
+                # BN (no ReLU yet)
+                total_flops += 2 * block.bn2.num_features * h_out * w_out
+                
+                # به‌روزرسانی spatial size
+                current_h, current_w = h_out, w_out
+                
+                # Shortcut (if exists)
+                if len(block.shortcut) > 0:
+                    for layer in block.shortcut:
+                        if isinstance(layer, nn.Conv2d):
+                            # Shortcut conv: 1x1 conv
+                            flops = 2 * layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * \
+                                    current_h * current_w * layer.out_channels
+                            total_flops += flops
+                        elif isinstance(layer, nn.BatchNorm2d):
+                            total_flops += 2 * layer.num_features * current_h * current_w
+                
+                # Addition (shortcut + conv2)
+                total_flops += current_h * current_w * block.bn2.num_features
+                
+                # ReLU after addition
+                total_flops += current_h * current_w * block.bn2.num_features
+        
+        # Global Average Pooling: no FLOPs (just averaging)
+        # در واقع میانگین‌گیری روی spatial dimensions
+        total_flops += current_h * current_w * model.linear.in_features
+        
+        # Linear layer
+        total_flops += 2 * model.linear.in_features * model.linear.out_features
+        
+        return total_flops
 
     def get_params_count(self):
-
         return self._original_params, self._pruned_params
 
     def get_flops_count(self):
-
         return self._original_flops, self._pruned_flops
