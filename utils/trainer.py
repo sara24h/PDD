@@ -48,7 +48,7 @@ class PDDTrainer:
                 # مطابق مقاله: یک ماسک با شکل [1, out_channels, 1, 1]
                 # مقداردهی اولیه تصادفی با توزیع نرمال
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device),
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.001,
                     requires_grad=True
                 )
                 masks[name] = mask
