@@ -1,6 +1,14 @@
 """
 Pruning script for PDD (Pruning During Distillation)
 This file contains only the pruning phase
+
+EXACT IMPLEMENTATION AS PER PAPER:
+Paper states: "a score of 0 indicates that the channel is redundant and can be pruned, 
+               otherwise, it is preserved."
+
+Therefore: threshold = 0.0 (not 0.5)
+- score = 0 → PRUNE
+- score > 0 → KEEP
 """
 
 import torch
@@ -19,8 +27,8 @@ def parse_args():
                         help='Path to checkpoint with masks')
     parser.add_argument('--save_dir', type=str, default='./checkpoints',
                         help='Directory to save pruned model')
-    parser.add_argument('--threshold', type=float, default=0.5,
-                        help='Pruning threshold')
+    parser.add_argument('--threshold', type=float, default=0.0,
+                        help='Pruning threshold (paper uses 0.0)')
     
     return parser.parse_args()
 
@@ -28,17 +36,19 @@ def parse_args():
 def main():
     args = parse_args()
     
-    print("\n" + "="*60)
-    print("Phase 2: Model Pruning")
-    print("="*60)
+    print("\n" + "="*70)
+    print("Phase 2: Model Pruning (PDD Paper Implementation)")
+    print("="*70)
+    print(f"Threshold: {args.threshold} (paper: score=0 means prune)")
+    print("="*70)
     
     # Check if checkpoint exists
     if not os.path.isfile(args.checkpoint):
-        print(f"✗ Error: Checkpoint not found at {args.checkpoint}")
-        print("\nPlease run train.py first to generate the checkpoint with masks")
+        print(f"\n✗ Error: Checkpoint not found at {args.checkpoint}")
+        print("Please run train.py first to generate the checkpoint with masks")
         exit(1)
     
-    print(f"Loading checkpoint from: {args.checkpoint}")
+    print(f"\nLoading checkpoint from: {args.checkpoint}")
     
     # Load checkpoint
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
@@ -66,15 +76,35 @@ def main():
     masks = checkpoint['masks']
     print(f"✓ Loaded {len(masks)} masks")
     
-    # Display mask statistics
-    print("\n" + "-"*60)
-    print("Mask Statistics:")
-    print("-"*60)
+    # Display mask value distribution
+    print("\n" + "-"*70)
+    print("Mask Value Distribution:")
+    print("-"*70)
+    
+    for name, mask in masks.items():
+        values = mask.squeeze().cpu()
+        num_zero = (values == 0.0).sum().item()
+        num_nonzero = (values > 0.0).sum().item()
+        total = values.numel()
+        
+        print(f"{name:40s} | Total: {total:4d} | "
+              f"Zeros: {num_zero:4d} ({100*num_zero/total:5.2f}%) | "
+              f"NonZeros: {num_nonzero:4d} ({100*num_nonzero/total:5.2f}%)")
+        print(f"{'':40s} | Min: {values.min():.4f} | Max: {values.max():.4f} | "
+              f"Mean: {values.mean():.4f} | Std: {values.std():.4f}")
+    
+    print("-"*70)
+    
+    # Display mask statistics with threshold
+    print("\n" + "-"*70)
+    print(f"Channel Pruning Statistics (threshold={args.threshold}):")
+    print("-"*70)
     
     total_channels = 0
     kept_channels = 0
     
     for name, mask in masks.items():
+        # Paper: "score of 0 indicates redundant" → use threshold=0.0
         mask_binary = (mask.squeeze() > args.threshold).float()
         total = mask_binary.numel()
         kept = mask_binary.sum().item()
@@ -83,37 +113,40 @@ def main():
         kept_channels += kept
         
         pruning_ratio = (1 - kept / total) * 100
-        print(f"{name:40s} | Total: {total:4d} | Kept: {kept:4d} | Pruned: {pruning_ratio:5.2f}%")
+        print(f"{name:40s} | Total: {total:4d} | Kept: {kept:4d} | "
+              f"Pruned: {total-kept:4d} ({pruning_ratio:5.2f}%)")
     
     overall_pruning = (1 - kept_channels / total_channels) * 100
-    print("-"*60)
-    print(f"{'Overall':40s} | Total: {total_channels:4d} | Kept: {kept_channels:4d} | Pruned: {overall_pruning:5.2f}%")
-    print("-"*60)
+    print("-"*70)
+    print(f"{'Overall':40s} | Total: {total_channels:4d} | "
+          f"Kept: {kept_channels:4d} | "
+          f"Pruned: {total_channels-kept_channels:4d} ({overall_pruning:5.2f}%)")
+    print("-"*70)
     
     # Create pruner
     print("\nInitializing pruner...")
-    pruner = ModelPruner(student, masks)
+    pruner = ModelPruner(student, masks, threshold=args.threshold)
     
     # Calculate original statistics
     original_params, pruned_params_est = pruner.get_params_count()
     original_flops, pruned_flops_est = pruner.get_flops_count()
     
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("Compression Statistics (Estimated):")
-    print("="*60)
+    print("="*70)
     print(f"Original Parameters: {original_params:,}")
-    print(f"Pruned Parameters: {pruned_params_est:,}")
+    print(f"Pruned Parameters:   {pruned_params_est:,}")
     print(f"Parameters Reduction: {(1 - pruned_params_est/original_params)*100:.2f}%")
     print(f"\nOriginal FLOPs: {original_flops:,}")
-    print(f"Pruned FLOPs: {pruned_flops_est:,}")
+    print(f"Pruned FLOPs:   {pruned_flops_est:,}")
     print(f"FLOPs Reduction: {(1 - pruned_flops_est/original_flops)*100:.2f}%")
-    print("="*60)
+    print("="*70)
     
     # Prune the model
     print("\nPruning model...")
-    print("-"*60)
+    print("-"*70)
     pruned_student = pruner.prune()
-    print("-"*60)
+    print("-"*70)
     print("✓ Model pruned successfully")
     
     # Calculate actual statistics after pruning
@@ -121,16 +154,16 @@ def main():
     params_reduction = (1 - actual_params / original_params) * 100
     flops_reduction = (1 - pruned_flops_est / original_flops) * 100
     
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("Final Compression Statistics:")
-    print("="*60)
+    print("="*70)
     print(f"Original Parameters: {original_params:,}")
-    print(f"Pruned Parameters: {actual_params:,}")
+    print(f"Pruned Parameters:   {actual_params:,}")
     print(f"Parameters Reduction: {params_reduction:.2f}%")
     print(f"\nOriginal FLOPs: {original_flops:,}")
     print(f"Pruned FLOPs (estimated): {pruned_flops_est:,}")
     print(f"FLOPs Reduction: {flops_reduction:.2f}%")
-    print("="*60)
+    print("="*70)
     
     # Save pruned model
     os.makedirs(args.save_dir, exist_ok=True)
@@ -150,7 +183,21 @@ def main():
     
     print(f"\n✓ Pruned model saved to: {save_path}")
     print("\nNext step: Run finetune.py to fine-tune the pruned model")
-    print("="*60 + "\n")
+    print("="*70 + "\n")
+    
+    # Print paper comparison
+    print("\n" + "="*70)
+    print("PAPER RESULTS COMPARISON (ResNet20 student, ResNet56 teacher):")
+    print("="*70)
+    print("Paper results on CIFAR10:")
+    print("  - FLOPs Reduction: 39.53%")
+    print("  - Parameters Reduction: 32.77%")
+    print("  - Accuracy: 91.65% (vs 91.48% baseline)")
+    print(f"\nYour results:")
+    print(f"  - FLOPs Reduction: {flops_reduction:.2f}%")
+    print(f"  - Parameters Reduction: {params_reduction:.2f}%")
+    print("  - Accuracy: [will be determined after fine-tuning]")
+    print("="*70 + "\n")
 
 
 if __name__ == '__main__':
