@@ -38,16 +38,23 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-        """Initialize learnable masks for each conv layer"""
+   
         masks = {}
-        
-        # For each conv layer in the student model
+
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # Initialize mask with shape [1, out_channels, 1, 1]
+            # Initialize mask with shape [1, out_channels, 1, 1]
                 mask = nn.Parameter(torch.randn(1, module.out_channels, 1, 1))
+                mask = mask.to(self.device)
                 masks[name] = mask
-        
+
+            elif 'shortcut' in name and isinstance(module, nn.Sequential):
+                for sub_name, sub_module in module.named_modules():
+                    if isinstance(sub_module, nn.Conv2d):
+                        mask = nn.Parameter(torch.randn(1, sub_module.out_channels, 1, 1))
+                        mask = mask.to(self.device)
+                        masks[f"{name}.{sub_name}"] = mask
+    
         return masks
 
     def _apply_masks(self):
