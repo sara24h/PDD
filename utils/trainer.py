@@ -4,6 +4,32 @@ import torch.nn.functional as F
 import numpy as np
 
 
+class LearnableMask(nn.Module):
+    """Learnable mask module with improved forward computation"""
+    def __init__(self, num_channels, device):
+        super(LearnableMask, self).__init__()
+        # مقداردهی اولیه با توزیع نرمال
+        self.mask = nn.Parameter(
+            torch.randn(1, num_channels, 1, 1, device=device),
+            requires_grad=True
+        )
+    
+    def forward(self):
+        """
+        Compute mask value between 0 and 1 from raw mask values.
+        Raw mask values are typically in range [-inf, +inf]
+        We map them to [-1, 1] using tanh, then shift and scale to [0, 1]
+        """
+        # Step 1: Map raw values to [-1, 1] using tanh
+        normalized = torch.tanh(self.mask)
+        
+        # Step 2: Shift and scale to [0, 1]
+        # (normalized + 1) / 2 maps [-1, 1] to [0, 1]
+        mask_01 = (normalized + 1.0) / 2.0
+        
+        return mask_01
+
+
 class PDDTrainer:
     def __init__(self, student, teacher, train_loader, test_loader, device, args):
         self.student = student
@@ -13,11 +39,13 @@ class PDDTrainer:
         self.device = device
         self.args = args
         
-        # Initialize masks
-        self.masks = self._initialize_masks()
+        # Initialize learnable masks
+        self.mask_modules = self._initialize_masks()
         
-        # Optimizer - فقط پارامترهای مدل و ماسک‌ها را بهینه‌سازی می‌کنیم
-        mask_params = [mask for mask in self.masks.values()]
+        # Optimizer - بهینه‌سازی پارامترهای مدل و ماسک‌ها
+        mask_params = []
+        for mask_module in self.mask_modules.values():
+            mask_params.extend(mask_module.parameters())
         
         self.optimizer = torch.optim.SGD(
             list(self.student.parameters()) + mask_params,
@@ -40,80 +68,39 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-        """Initialize learnable masks for each convolutional layer"""
-        masks = {}
+        """Initialize learnable mask modules for each convolutional layer"""
+        mask_modules = nn.ModuleDict()
         
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # مطابق مقاله: یک ماسک با شکل [1, out_channels, 1, 1]
-                # مقداردهی اولیه تصادفی با توزیع نرمال
-                mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.001,
-                    requires_grad=True
+                # ایجاد یک mask module برای این لایه
+                mask_modules[name.replace('.', '_')] = LearnableMask(
+                    module.out_channels, 
+                    self.device
                 )
-                masks[name] = mask
         
-        return masks
+        return mask_modules
 
-    def _apply_masks(self, features_dict):
-        """Apply masks to feature maps during forward pass"""
-        masked_features = {}
-        
-        for name, features in features_dict.items():
-            if name in self.masks:
-                # اعمال تابع ApproxSign به ماسک
-                mask = self._approx_sign(self.masks[name])
-                # ضرب ماسک در feature map
-                masked_features[name] = features * mask
-            else:
-                masked_features[name] = features
-        
-        return masked_features
-
-    def _approx_sign(self, x):
-        """Differentiable approximation of sign function from the paper
-        
-        Equation (2) from the paper:
-                    { 0                    if x < -1
-        ApproxSign = { (x+1)²/2            if -1 ≤ x < 0
-                    { (2x - x² + 1)/2      if 0 ≤ x < 1
-                    { 1                    otherwise
-        """
-        result = torch.zeros_like(x)
-        
-        # x < -1: output = 0
-        mask1 = (x < -1).float()
-        result = result + mask1 * 0.0
-        
-        # -1 ≤ x < 0: output = (x+1)²/2
-        mask2 = ((x >= -1) & (x < 0)).float()
-        result = result + mask2 * ((x + 1) ** 2 / 2)
-        
-        # 0 ≤ x < 1: output = (2x - x² + 1)/2
-        mask3 = ((x >= 0) & (x < 1)).float()
-        result = result + mask3 * (2 * x - x**2 + 1) / 2
-        
-        # x ≥ 1: output = 1
-        mask4 = (x >= 1).float()
-        result = result + mask4 * 1.0
-        
-        return result
+    def _get_mask_for_layer(self, layer_name):
+        """Get the computed mask (0-1 values) for a specific layer"""
+        mask_key = layer_name.replace('.', '_')
+        if mask_key in self.mask_modules:
+            return self.mask_modules[mask_key]()
+        return None
 
     def _forward_with_masks(self, x):
         """Forward pass with mask application"""
-        # اینجا باید forward pass را به صورت دستی پیاده‌سازی کنیم
-        # تا بتوانیم ماسک‌ها را اعمال کنیم
-        
+        # Conv1
         out = self.student.conv1(x)
         out = self.student.bn1(out)
         out = F.relu(out)
         
-        # اعمال ماسک به خروجی conv1
-        if 'conv1' in self.masks:
-            mask = self._approx_sign(self.masks['conv1'])
+        # Apply mask to conv1
+        mask = self._get_mask_for_layer('conv1')
+        if mask is not None:
             out = out * mask
         
-        # پردازش لایه‌ها
+        # Process layers
         for layer_name in ['layer1', 'layer2', 'layer3']:
             layer = getattr(self.student, layer_name)
             for i, block in enumerate(layer):
@@ -124,20 +111,18 @@ class PDDTrainer:
                 out = block.bn1(out)
                 out = F.relu(out)
                 
-                # اعمال ماسک
-                mask_name = f'{layer_name}.{i}.conv1'
-                if mask_name in self.masks:
-                    mask = self._approx_sign(self.masks[mask_name])
+                # Apply mask
+                mask = self._get_mask_for_layer(f'{layer_name}.{i}.conv1')
+                if mask is not None:
                     out = out * mask
                 
                 # Conv2 of block
                 out = block.conv2(out)
                 out = block.bn2(out)
                 
-                # اعمال ماسک
-                mask_name = f'{layer_name}.{i}.conv2'
-                if mask_name in self.masks:
-                    mask = self._approx_sign(self.masks[mask_name])
+                # Apply mask
+                mask = self._get_mask_for_layer(f'{layer_name}.{i}.conv2')
+                if mask is not None:
                     out = out * mask
                 
                 # Shortcut
@@ -164,7 +149,7 @@ class PDDTrainer:
         print(f"Learning Rate:      {self.args.lr}")
         print(f"Epochs:             {self.args.epochs}")
         print(f"LR Decay:           {self.args.lr_decay_epochs}")
-        print(f"Total Masks:        {len(self.masks)}")
+        print(f"Total Masks:        {len(self.mask_modules)}")
         print("="*70 + "\n")
         
         for epoch in range(self.args.epochs):
@@ -198,17 +183,21 @@ class PDDTrainer:
                 soft_student = F.log_softmax(student_outputs / self.args.temperature, dim=1)
                 kd_loss = self.kd_criterion(soft_student, soft_teacher) * (self.args.temperature ** 2)
                 
-                # 3. Regularization loss to encourage sparsity (L1 on masks)
+                # 3. Sparsity regularization (L1 on mask values)
                 reg_loss = 0.0
-                for mask in self.masks.values():
-                    # L1 regularization بر روی خروجی ApproxSign
-                    binary_mask = self._approx_sign(mask)
-                    reg_loss += torch.sum(binary_mask)
-                reg_loss = reg_loss / sum(m.numel() for m in self.masks.values())
+                num_masks = 0
+                for mask_module in self.mask_modules.values():
+                    mask_values = mask_module()
+                    reg_loss += torch.sum(mask_values)
+                    num_masks += mask_values.numel()
                 
-                # Total loss (Equation 4 from paper)
-                # L_total = L(z_s, z_t) + CE(z_s, Y)
-                total_loss = self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss + 0.1 * reg_loss
+                if num_masks > 0:
+                    reg_loss = reg_loss / num_masks
+                
+                # Total loss
+                total_loss = (self.args.alpha * kd_loss + 
+                             (1 - self.args.alpha) * ce_loss + 
+                             0.1 * reg_loss)
                 
                 # Backward pass
                 total_loss.backward()
@@ -232,28 +221,32 @@ class PDDTrainer:
             # Update learning rate
             self.scheduler.step()
 
+            # Calculate pruning statistics
             pruning_ratio = self._calculate_pruning_ratio()
             
             print(f"\nEpoch [{epoch+1}/{self.args.epochs}]")
             print(f"Train: Loss={train_loss/len(self.train_loader):.4f}, Acc={train_acc:.2f}%")
             print(f"Test:  Acc={test_acc:.2f}%")
             print(f"Losses: KD={kd_loss_total/len(self.train_loader):.4f}, "
-                f"CE={ce_loss_total/len(self.train_loader):.4f}, "
-                f"Reg={reg_loss_total/len(self.train_loader):.6f}")
+                  f"CE={ce_loss_total/len(self.train_loader):.4f}, "
+                  f"Reg={reg_loss_total/len(self.train_loader):.6f}")
             print(f"Pruning Ratio: {pruning_ratio:.2f}%")
             
             # Save best model
             if test_acc > self.best_acc:
                 self.best_acc = test_acc
-                self.best_masks = {name: mask.clone().detach() 
-                                  for name, mask in self.masks.items()}
+                self.best_masks = {}
+                for name, mask_module in self.mask_modules.items():
+                    self.best_masks[name] = mask_module.mask.clone().detach()
+                
                 if (epoch + 1) % 5 == 0 or epoch == 0:
                     print(f"✓ New best accuracy: {test_acc:.2f}%")
         
         # Restore best masks
         if self.best_masks is not None:
-            for name in self.masks.keys():
-                self.masks[name].data = self.best_masks[name].data
+            for name, mask_module in self.mask_modules.items():
+                if name in self.best_masks:
+                    mask_module.mask.data = self.best_masks[name].data
         
         print("\n" + "="*70)
         print("Training Complete!")
@@ -278,28 +271,53 @@ class PDDTrainer:
         
         return 100. * correct / total
 
-    def _calculate_pruning_ratio(self):
-        """Calculate the current pruning ratio"""
+    def _calculate_pruning_ratio(self, threshold=0.5):
+        """Calculate the current pruning ratio based on threshold"""
         total_channels = 0
         pruned_channels = 0
         
-        for mask in self.masks.values():
-            binary_mask = self._approx_sign(mask)
-            total_channels += mask.numel()
-            # کانال‌هایی که نزدیک به 0 هستند، هرس شده‌اند
-            pruned_channels += (binary_mask < 0.5).sum().item()
+        for mask_module in self.mask_modules.values():
+            mask_values = mask_module()
+            total_channels += mask_values.numel()
+            # Channels with mask value < threshold are considered pruned
+            pruned_channels += (mask_values < threshold).sum().item()
         
         if total_channels == 0:
             return 0.0
         
         return 100. * pruned_channels / total_channels
 
-    def get_masks(self):
-        """Get the current masks as binary (0 or 1)"""
+    def get_masks(self, threshold=0.5):
+        """Get the current masks as binary (0 or 1) based on threshold"""
         binary_masks = {}
-        for name, mask in self.masks.items():
-            # اعمال ApproxSign و تبدیل به باینری
-            binary_mask = self._approx_sign(mask)
-            # Threshold در 0.5
-            binary_masks[name] = (binary_mask > 0.5).float()
+        
+        for name, mask_module in self.mask_modules.items():
+            # Get mask values (0-1 range)
+            mask_values = mask_module()
+            # Convert to binary based on threshold
+            binary_mask = (mask_values > threshold).float()
+            # Convert name back to original format
+            original_name = name.replace('_', '.')
+            binary_masks[original_name] = binary_mask
+        
         return binary_masks
+
+    def get_mask_statistics(self):
+        """Get detailed statistics about mask values"""
+        stats = {}
+        
+        for name, mask_module in self.mask_modules.items():
+            mask_values = mask_module().detach().cpu()
+            original_name = name.replace('_', '.')
+            
+            stats[original_name] = {
+                'mean': mask_values.mean().item(),
+                'std': mask_values.std().item(),
+                'min': mask_values.min().item(),
+                'max': mask_values.max().item(),
+                'below_0.5': (mask_values < 0.5).sum().item(),
+                'above_0.5': (mask_values >= 0.5).sum().item(),
+                'total': mask_values.numel()
+            }
+        
+        return stats
