@@ -14,14 +14,18 @@ class PDDTrainer:
         self.args = args
         
         # Initialize learnable masks for each conv layer
-        self.masks = {}
+        # Use nn.ParameterDict to properly register masks as parameters
+        self.masks = nn.ParameterDict()
+        # Keep a mapping of mask names to original layer names
+        self.mask_to_layer = {}
         self._initialize_masks()
         
         # Print after initialization - NOW INSIDE __init__
         print(f"Initialized {len(self.masks)} learnable masks")
         
         # Optimizer includes both model parameters and masks
-        params = list(student.parameters()) + list(self.masks.values())
+        # Now masks are properly registered as parameters
+        params = list(student.parameters()) + list(self.masks.parameters())
         self.optimizer = torch.optim.SGD(
             params,
             lr=args.lr,
@@ -45,9 +49,13 @@ class PDDTrainer:
             if isinstance(module, nn.Conv2d):
                 # Random initialization around 0 (uniform distribution [-1, 1])
                 # This gives approximately 50% chance of each channel being kept/pruned
-                mask = nn.Parameter(torch.rand(1, module.out_channels, 1, 1) * 2 - 1)
-                # Move mask to the same device as the model
-                self.masks[name] = mask.to(self.device)
+                mask = torch.rand(1, module.out_channels, 1, 1, device=self.device) * 2 - 1
+                # Use nn.Parameter to make it a leaf tensor and register it properly
+                # Replace dots with underscores in name for ParameterDict compatibility
+                param_name = name.replace('.', '_')
+                self.masks[param_name] = nn.Parameter(mask)
+                # Keep mapping to original name
+                self.mask_to_layer[param_name] = name
     
     def approx_sign(self, x):
         """
@@ -82,8 +90,10 @@ class PDDTrainer:
         
         hooks = []
         for name, module in model.named_modules():
-            if name in self.masks:
-                mask = self.masks[name]
+            # Convert layer name to mask parameter name
+            param_name = name.replace('.', '_')
+            if param_name in self.masks:
+                mask = self.masks[param_name]
                 hook = module.register_forward_hook(
                     lambda m, i, o, mask=mask: hook_fn(m, i, o, mask)
                 )
@@ -244,8 +254,10 @@ class PDDTrainer:
         print(f"Best Test Accuracy: {self.best_acc:.2f}%")
     
     def get_masks(self):
-        """Return binarized masks"""
+        """Return binarized masks with original layer names"""
         binary_masks = {}
-        for name, mask in self.masks.items():
-            binary_masks[name] = self.approx_sign(mask)
+        for param_name, mask in self.masks.items():
+            # Convert back to original layer name
+            original_name = self.mask_to_layer[param_name]
+            binary_masks[original_name] = self.approx_sign(mask)
         return binary_masks
