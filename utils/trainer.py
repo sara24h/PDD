@@ -40,21 +40,40 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-        """Initialize learnable masks for each convolutional layer"""
+        """
+        Initialize learnable masks for each convolutional layer
+        
+        Paper: "First of all, we randomly initialized each mask x_i"
+        No special scaling mentioned - just standard normal distribution
+        """
         masks = {}
         
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
                 # مطابق مقاله: یک ماسک با شکل [1, out_channels, 1, 1]
-                # مقداردهی اولیه تصادفی با توزیع نرمال
+                # مقداردهی اولیه تصادفی با توزیع نرمال (بدون scaling)
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device),requires_grad=True)*0.001
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device),
+                    requires_grad=True
+                )
                 masks[name] = mask
         
         return masks
 
     def _approx_sign(self, x):
+        """
+        Differentiable approximation of sign function from the paper (Equation 2)
         
+        ApproxSign(x) = {
+            0                    if x < -1
+            (x+1)²/2            if -1 ≤ x < 0
+            (2x - x² + 1)/2     if 0 ≤ x < 1
+            1                    otherwise
+        }
+        
+        This function maps raw mask values to [0, 1] range
+        Paper: "a score of 0 indicates that the channel is redundant and can be pruned"
+        """
         result = torch.zeros_like(x)
         
         # x < -1: output = 0
@@ -76,7 +95,13 @@ class PDDTrainer:
         return result
 
     def _forward_with_masks(self, x):
-      
+        """
+        Forward pass with mask application (Equation 3 from paper)
+        
+        The paper defines: z_s = h_n(h_{n-1}(...h_0(M)·A(x_0)...)·A(x_{n-1}))·A(x_n)
+        where A(·) is the ApproxSign function
+        """
+        # Conv1 + BN + ReLU
         out = self.student.conv1(x)
         out = self.student.bn1(out)
         out = F.relu(out)
@@ -269,7 +294,15 @@ class PDDTrainer:
         return 100. * correct / total
 
     def _calculate_pruning_ratio(self, threshold=0.0):
+        """
+        Calculate the current pruning ratio
         
+        Paper: "a score of 0 indicates that the channel is redundant"
+        So we use threshold=0.0 (not 0.5)
+        
+        Args:
+            threshold: value below which channels are considered pruned (default: 0.0)
+        """
         total_channels = 0
         pruned_channels = 0
         
@@ -286,7 +319,18 @@ class PDDTrainer:
         return 100. * pruned_channels / total_channels
 
     def get_masks(self, threshold=0.0):
+        """
+        Get the current masks as binary (0 or 1) based on threshold
         
+        Paper: "a score of 0 indicates that the channel is redundant"
+        So threshold=0.0 (not 0.5)
+        
+        Args:
+            threshold: channels with score <= threshold will be pruned (default: 0.0)
+        
+        Returns:
+            Dictionary of binary masks (0 = prune, 1 = keep)
+        """
         binary_masks = {}
         for name, mask in self.masks.items():
             # Apply ApproxSign to get values in [0, 1]
