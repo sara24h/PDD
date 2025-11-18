@@ -51,7 +51,7 @@ class PDDTrainer:
         return masks
 
     def _apply_masks(self):
-    """Apply masks to the student model"""
+        """Apply masks to the student model"""
         for name, module in self.student.named_modules():
             if name in self.masks and isinstance(module, nn.Conv2d):
              # Apply the ApproxSign function to the mask
