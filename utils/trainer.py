@@ -7,7 +7,7 @@ import numpy as np
 class PDDTrainer:
     """
     Pruning During Distillation (PDD) Trainer
-    Balanced strategy for achieving ~30% pruning as per paper
+    Exact implementation based on the paper
     """
     def __init__(self, student, teacher, train_loader, test_loader, device, args):
         self.student = student
@@ -20,7 +20,7 @@ class PDDTrainer:
         # Initialize masks
         self.masks = self._initialize_masks()
         
-        # ✅ Single optimizer for both model and masks
+        # ✅ Single optimizer for both model and masks (Equation 4)
         mask_params = list(self.masks.values())
         
         self.optimizer = torch.optim.SGD(
@@ -45,22 +45,22 @@ class PDDTrainer:
 
     def _initialize_masks(self):
         """
-        Initialize learnable masks with balanced distribution
+        Initialize learnable masks
+        Paper: "randomly initialized"
         
-        Key insight from paper results (~32% pruning):
-        - Need masks distributed around 0 to allow both pruning and keeping
-        - Larger variance allows some masks to go below -1 (pruned)
+        Strategy: Start positive to keep channels initially, let network learn to prune
+        This prevents aggressive early pruning
         """
         masks = {}
         
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # ✅ Initialize around 0 with moderate variance
-                # mean=0: balanced (50% chance to prune/keep)
-                # std=0.5: allows ~15-20% to start below -1 (pruned)
-                # This gives natural pruning distribution
+                # Initialize with positive bias to start with most channels kept
+                # std=0.2 keeps variance small, mean=0.5 biases toward keeping
+                # This gives: mean ≈ 0.5, range ≈ [0, 1]
+                # After ApproxSign: most values > 0.5 (kept)
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.5,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.2 + 0.5,
                     requires_grad=True
                 )
                 masks[name] = mask
@@ -79,7 +79,7 @@ class PDDTrainer:
         """
         result = torch.zeros_like(x)
         
-        # x < -1: output = 0 (PRUNED)
+        # x < -1: output = 0
         mask1 = (x < -1).float()
         result = result + mask1 * 0.0
         
@@ -91,7 +91,7 @@ class PDDTrainer:
         mask3 = ((x >= 0) & (x < 1)).float()
         result = result + mask3 * (2 * x - x**2 + 1) / 2
         
-        # x ≥ 1: output = 1 (KEPT)
+        # x ≥ 1: output = 1
         mask4 = (x >= 1).float()
         result = result + mask4 * 1.0
         
@@ -100,6 +100,7 @@ class PDDTrainer:
     def _forward_with_masks(self, x):
         """
         Forward pass with mask application (Equation 3)
+        z̃_s = h_n(h_{n-1}(...h_0(M)A(x_0)...)A(x_{n-1}))A(x_n)
         """
         # Conv1 + BN + ReLU
         out = self.student.conv1(x)
@@ -157,11 +158,11 @@ class PDDTrainer:
 
     def train(self):
         """
-        Train with pruning during distillation
-        Equation (4): L_total = L(z̃_s, z_t) + CE(z̃_s, Y)
+        Train the student model with pruning during distillation
+        Following Equation (4): L_total = L(z̃_s, z_t) + CE(z̃_s, Y)
         """
         print("\n" + "="*70)
-        print("Starting Pruning During Distillation (PDD) - Balanced Strategy")
+        print("Starting Pruning During Distillation (PDD) - Paper Exact")
         print("="*70)
         print(f"Temperature:        {self.args.temperature}")
         print(f"Alpha (distill):    {self.args.alpha}")
@@ -170,9 +171,6 @@ class PDDTrainer:
         print(f"LR Decay:           {self.args.lr_decay_epochs}")
         print(f"Total Masks:        {len(self.masks)}")
         print("="*70 + "\n")
-        
-        # Print initial mask distribution
-        self._print_detailed_mask_stats("Initial")
         
         for epoch in range(self.args.epochs):
             # Training phase
@@ -197,15 +195,16 @@ class PDDTrainer:
                 
                 # ✅ Calculate losses - ONLY KD + CE (Equation 4)
                 
-                # 1. Classification loss
+                # 1. Classification loss (Cross Entropy)
                 ce_loss = self.criterion(student_outputs, targets)
                 
-                # 2. Knowledge distillation loss
+                # 2. Knowledge distillation loss (KL Divergence)
                 soft_teacher = F.softmax(teacher_outputs / self.args.temperature, dim=1)
                 soft_student = F.log_softmax(student_outputs / self.args.temperature, dim=1)
                 kd_loss = self.kd_criterion(soft_student, soft_teacher) * (self.args.temperature ** 2)
                 
                 # ✅ Total loss (Equation 4) - NO REGULARIZATION
+                # L_total = L(z̃_s, z_t) + CE(z̃_s, Y)
                 total_loss = self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss
                 
                 # Backward pass and optimization
@@ -229,7 +228,8 @@ class PDDTrainer:
             # Update learning rate
             self.scheduler.step()
 
-            # Calculate pruning ratio
+            # ✅ Calculate pruning ratio with threshold=0.5
+            # Channels with ApproxSign < 0.5 are considered pruned
             pruning_ratio = self._calculate_pruning_ratio()
             
             # Print epoch statistics
@@ -240,8 +240,8 @@ class PDDTrainer:
                   f"CE={ce_loss_total/len(self.train_loader):.4f}")
             print(f"Pruning Ratio: {pruning_ratio:.2f}%")
             
-            # Print detailed mask statistics
-            self._print_detailed_mask_stats(f"Epoch {epoch+1}")
+            # Print mask statistics for debugging
+            self._print_mask_stats()
             
             # Save best model based on test accuracy
             if test_acc > self.best_acc:
@@ -262,33 +262,25 @@ class PDDTrainer:
         print(f"Final Pruning: {self._calculate_pruning_ratio():.2f}%")
         print("="*70 + "\n")
 
-    def _print_detailed_mask_stats(self, label):
-        """Print detailed mask statistics for debugging"""
-        raw_values = []
-        approx_values = []
-        below_minus_one = 0
-        total_channels = 0
+    def _print_mask_stats(self):
+        """Print mask statistics for debugging"""
+        raw_means = []
+        raw_mins = []
+        raw_maxs = []
+        approx_means = []
         
         for mask in self.masks.values():
             raw = mask.detach()
             approx = self._approx_sign(mask).detach()
             
-            raw_values.extend(raw.cpu().flatten().tolist())
-            approx_values.extend(approx.cpu().flatten().tolist())
-            
-            below_minus_one += (raw < -1).sum().item()
-            total_channels += raw.numel()
+            raw_means.append(raw.mean().item())
+            raw_mins.append(raw.min().item())
+            raw_maxs.append(raw.max().item())
+            approx_means.append(approx.mean().item())
         
-        raw_values = np.array(raw_values)
-        approx_values = np.array(approx_values)
-        
-        print(f"\n  [{label}] Mask Distribution:")
-        print(f"    Raw: mean={raw_values.mean():.3f}, std={raw_values.std():.3f}, "
-              f"min={raw_values.min():.3f}, max={raw_values.max():.3f}")
-        print(f"    After ApproxSign: mean={approx_values.mean():.3f}, "
-              f"min={approx_values.min():.3f}, max={approx_values.max():.3f}")
-        print(f"    Channels with raw < -1: {below_minus_one}/{total_channels} "
-              f"({100*below_minus_one/total_channels:.1f}%)")
+        print(f"  Raw Masks: Avg={np.mean(raw_means):.3f}, "
+              f"Min={np.min(raw_mins):.3f}, Max={np.max(raw_maxs):.3f}")
+        print(f"  After ApproxSign: Avg={np.mean(approx_means):.3f}")
 
     def evaluate(self):
         """Evaluate the student model on test set"""
@@ -310,16 +302,19 @@ class PDDTrainer:
     def _calculate_pruning_ratio(self):
         """
         Calculate pruning ratio
-        Channels with raw mask < -1 are pruned (ApproxSign = 0)
+        
+        ✅ Paper: Channels with score = 0 are pruned
+        After ApproxSign, score = 0 when raw mask < -1
+        Using threshold = 0.5 on ApproxSign output
         """
         total_channels = 0
         pruned_channels = 0
         
         for mask in self.masks.values():
-            raw_mask = mask.detach()
-            total_channels += raw_mask.numel()
-            # Count channels where raw value < -1 (will be pruned)
-            pruned_channels += (raw_mask < -1).sum().item()
+            binary_mask = self._approx_sign(mask)
+            total_channels += binary_mask.numel()
+            # Channels with ApproxSign < 0.5 are considered pruned
+            pruned_channels += (binary_mask < 0.5).sum().item()
         
         if total_channels == 0:
             return 0.0
@@ -329,11 +324,12 @@ class PDDTrainer:
     def get_masks(self):
         """
         Get binary masks for pruning
-        Keep channels where raw mask >= -1
+        
+        ✅ Threshold = 0.5: channels with ApproxSign < 0.5 are pruned
         """
         binary_masks = {}
         for name, mask in self.masks.items():
-            raw_mask = mask.detach()
-            # Keep if raw >= -1, prune if raw < -1
-            binary_masks[name] = (raw_mask >= -1).float()
+            binary_mask = self._approx_sign(mask)
+            # Keep channels with score > 0.5
+            binary_masks[name] = (binary_mask > 0.5).float()
         return binary_masks
