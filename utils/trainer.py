@@ -238,7 +238,7 @@ class PDDTrainer:
             print(f"Train: Loss={train_loss/len(self.train_loader):.4f}, Acc={train_acc:.2f}%")
             print(f"Test:  Acc={test_acc:.2f}%")
             print(f"Losses: KD={kd_loss_total/len(self.train_loader):.4f}, "
-                  f"CE={ce_loss_total/len(self.train_loader):.4f}, "
+                  f"CE={ce_loss_total/len(self.train_loader):.4f}, ")
                   #f"Reg={reg_loss_total/len(self.train_loader):.6f}")
             print(f"Pruning Ratio (score=0): {pruning_ratio:.2f}%")
             
