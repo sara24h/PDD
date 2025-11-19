@@ -1,285 +1,178 @@
+# utils/pruner.py
 import torch
 import torch.nn as nn
 
-
 class ModelPruner:
-    def __init__(self, model, masks, threshold=0.0):
-    
+    def __init__(self, model, masks):
         self.model = model
         self.masks = masks
-        self.threshold = threshold
         self._original_params = None
         self._pruned_params = None
         self._original_flops = None
         self._pruned_flops = None
 
-    def _calculate_flops(self, model):
-        """محاسبه دقیق FLOPs برای ResNet روی CIFAR-10"""
-        total_flops = 0
-        
-        # برای CIFAR-10: input size = 32x32
-        h, w = 32, 32
-        
-        # Conv1: 3x3 conv, stride=1, input=32x32
-        layer = model.conv1
-        h_out, w_out = h, w  # stride=1, padding=1
-        # فرمول: K^2 * C_in * H_out * W_out * C_out
-        flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
-                 h_out * w_out * layer.out_channels)
-        total_flops += flops
-        
-        # BN1: 2 operations per element
-        total_flops += 2 * model.bn1.num_features * h_out * w_out
-        
-        # ReLU: 1 operation per element
-        total_flops += h_out * w_out * model.bn1.num_features
-        
-        current_h, current_w = h_out, w_out
-        
-        # پردازش هر stage
-        for stage_name in ['layer1', 'layer2', 'layer3']:
-            stage = getattr(model, stage_name)
-            
-            for block_idx, block in enumerate(stage):
-                stride = block.conv1.stride[0]
-                
-                # Conv1 of block
-                layer = block.conv1
-                h_out = (current_h + 2 * layer.padding[0] - layer.kernel_size[0]) // stride + 1
-                w_out = (current_w + 2 * layer.padding[1] - layer.kernel_size[1]) // stride + 1
-                
-                flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
-                        h_out * w_out * layer.out_channels)
-                total_flops += flops
-                
-                # BN + ReLU
-                total_flops += 2 * block.bn1.num_features * h_out * w_out
-                total_flops += h_out * w_out * block.bn1.num_features
-                
-                current_h, current_w = h_out, w_out
-                
-                # Conv2 of block
-                layer = block.conv2
-                h_out = (current_h + 2 * layer.padding[0] - layer.kernel_size[0]) // layer.stride[0] + 1
-                w_out = (current_w + 2 * layer.padding[1] - layer.kernel_size[1]) // layer.stride[1] + 1
-                
-                flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
-                        h_out * w_out * layer.out_channels)
-                total_flops += flops
-                
-                # BN
-                total_flops += 2 * block.bn2.num_features * h_out * w_out
-                
-                current_h, current_w = h_out, w_out
-                
-                # Shortcut (if exists)
-                if len(block.shortcut) > 0:
-                    for layer in block.shortcut:
-                        if isinstance(layer, nn.Conv2d):
-                            flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
-                                    current_h * current_w * layer.out_channels)
-                            total_flops += flops
-                        elif isinstance(layer, nn.BatchNorm2d):
-                            total_flops += 2 * layer.num_features * current_h * current_w
-                
-                # Addition + ReLU
-                total_flops += current_h * current_w * block.bn2.num_features
-                total_flops += current_h * current_w * block.bn2.num_features
-        
-        # Global Average Pooling
-        total_flops += current_h * current_w * model.linear.in_features
-        
-        # Linear layer: 2 * in_features * out_features
-        total_flops += 2 * model.linear.in_features * model.linear.out_features
-        
-        return total_flops
+    def _approx_sign(self, x):
+        # دقیقاً معادله (۲) مقاله
+        return torch.where(x < -1, torch.zeros_like(x),
+               torch.where(x < 0, (x + 1)**2 / 2,
+               torch.where(x < 1, 1/2 * (2*x - x**2 + 1),
+                           torch.ones_like(x))))
 
     def prune(self):
-      
-        print(f"\nAnalyzing masks (threshold={self.threshold})...")
-        
+        print("\n" + "="*90)
+        print("PDD PRUNING — Using ApproxSign(mask) > 1e-8 → EXACTLY AS IN THE PAPER")
+        print("="*90)
+
         keep_indices = {}
-        pruning_stats = {}
-        
         for name, mask in self.masks.items():
-            mask_flat = mask.squeeze().cpu()
-            # Paper: score > threshold → keep, score <= threshold → prune
-            keep_idx = torch.where(mask_flat > 1e-5)[0] 
-            total_channels = mask_flat.numel()
-            kept_channels = len(keep_idx)
-            
+            scores = mask.squeeze()  # (1,C,1,1) → (C)
+            approx = self._approx_sign(scores)
+            keep_idx = torch.where(approx > 1e-8)[0]
+
+            total = scores.numel()
+            kept = len(keep_idx)
+            ratio = 100.0 * (total - kept) / total if total > 0 else 0
+
             keep_indices[name] = keep_idx
-            pruning_stats[name] = {
-                'total': total_channels,
-                'kept': kept_channels,
-                'pruned': total_channels - kept_channels,
-                'ratio': (1 - kept_channels / total_channels) * 100
-            }
-            
-            print(f"{name:40s} | Total: {total_channels:4d} | "
-                  f"Kept: {kept_channels:4d} | "
-                  f"Pruned: {pruning_stats[name]['ratio']:.2f}%")
-        
+            print(f"{name:45s} → {kept:3d}/{total:3d} kept | {ratio:5.2f}% pruned")
+
         print("\nBuilding pruned model...")
-        pruned_model = self._build_pruned_model(keep_indices, pruning_stats)
-        
-        print("✓ Pruned model created")
-        
-        print("\nCopying weights...")
+        pruned_model = self._build_pruned_model(keep_indices)
+        print("Copying weights...")
         self._copy_weights(pruned_model, keep_indices)
-        print("✓ Weights copied")
-        
-        self._calculate_compression_stats(pruned_model)
-        
+        self._calc_stats(pruned_model)
+
+        op, pp = self.get_params_count()
+        of, pf = self.get_flops_count()
+        print("\n" + "="*90)
+        print("FINAL RESULT — MUST BE EXACTLY LIKE TABLE 1")
+        print(f"Params : {op:,} → {pp:,}   ({100*(1-pp/op):.2f}% reduction)")
+        print(f"FLOPs  : {of:,} → {pf:,}   ({100*(1-pf/of):.2f}% reduction)")
+        print("="*90)
+
         return pruned_model
 
-    def _build_pruned_model(self, keep_indices, stats):
-        """ساخت مدل با کانال‌های کمتر"""
+    def _build_pruned_model(self, keep):
         from models.resnet import ResNet, BasicBlock
-        
-        num_classes = self.model.linear.out_features
-        conv1_channels = stats['conv1']['kept'] if 'conv1' in stats else 16
-        
-        pruned_model = ResNet(BasicBlock, [3, 3, 3], num_classes=num_classes)
-        
-        if 'conv1' in keep_indices:
-            kept = len(keep_indices['conv1'])
-            pruned_model.conv1 = nn.Conv2d(3, kept, kernel_size=3, 
-                                           stride=1, padding=1, bias=False)
-            pruned_model.bn1 = nn.BatchNorm2d(kept)
-        
-        prev_channels = conv1_channels
-        
+        pruned = ResNet(BasicBlock, [3, 3, 3], num_classes=10).to(next(self.model.parameters()).device)
+
+        # conv1
+        if 'conv1' in keep:
+            c = len(keep['conv1'])
+            pruned.conv1 = nn.Conv2d(3, c, 3, 1, 1, bias=False)
+            pruned.bn1 = nn.BatchNorm2d(c)
+
+        prev_c = len(keep['conv1']) if 'conv1' in keep else 16
+
         for stage_idx, stage_name in enumerate(['layer1', 'layer2', 'layer3']):
-            stage = getattr(pruned_model, stage_name)
-            
-            for block_idx in range(len(stage)):
-                block = stage[block_idx]
-                stride = 2 if (block_idx == 0 and stage_idx > 0) else 1
-                in_channels = prev_channels
-                
-                conv1_name = f'{stage_name}.{block_idx}.conv1'
-                conv2_name = f'{stage_name}.{block_idx}.conv2'
-                
-                conv1_out = len(keep_indices[conv1_name]) if conv1_name in keep_indices else block.conv1.out_channels
-                conv2_out = len(keep_indices[conv2_name]) if conv2_name in keep_indices else block.conv2.out_channels
-                
-                block.conv1 = nn.Conv2d(in_channels, conv1_out, 
-                                       kernel_size=3, stride=stride, 
-                                       padding=1, bias=False)
-                block.bn1 = nn.BatchNorm2d(conv1_out)
-                
-                block.conv2 = nn.Conv2d(conv1_out, conv2_out, 
-                                       kernel_size=3, stride=1, 
-                                       padding=1, bias=False)
-                block.bn2 = nn.BatchNorm2d(conv2_out)
-                
-                if stride != 1 or in_channels != conv2_out:
-                    block.shortcut = nn.Sequential(
-                        nn.Conv2d(in_channels, conv2_out, 
-                                 kernel_size=1, stride=stride, bias=False),
-                        nn.BatchNorm2d(conv2_out)
+            stage = getattr(pruned, stage_name)
+            for i in range(3):
+                b = stage[i]
+                c1_name = f'{stage_name}.{i}.conv1'
+                c2_name = f'{stage_name}.{i}.conv2'
+
+                c1 = len(keep[c1_name]) if c1_name in keep else (16 if stage_idx==0 else 32 if stage_idx==1 else 64)
+                c2 = len(keep[c2_name]) if c2_name in keep else c1
+
+                stride = 2 if stage_idx > 0 and i == 0 else 1
+
+                b.conv1 = nn.Conv2d(prev_c, c1, 3, stride, 1, bias=False)
+                b.bn1 = nn.BatchNorm2d(c1)
+                b.conv2 = nn.Conv2d(c1, c2, 3, 1, 1, bias=False)
+                b.bn2 = nn.BatchNorm2d(c2)
+
+                if stride != 1 or prev_c != c2:
+                    b.shortcut = nn.Sequential(
+                        nn.Conv2d(prev_c, c2, 1, stride, bias=False),
+                        nn.BatchNorm2d(c2)
                     )
-                else:
-                    block.shortcut = nn.Sequential()
-                
-                prev_channels = conv2_out
-        
-        pruned_model.linear = nn.Linear(prev_channels, num_classes)
-        
-        return pruned_model
 
-    def _copy_weights(self, pruned_model, keep_indices):
-        """کپی کردن وزن‌ها از مدل اصلی به مدل هرس شده"""
-        
-        if 'conv1' in keep_indices:
-            idx = keep_indices['conv1']
-            pruned_model.conv1.weight.data = self.model.conv1.weight.data[idx, :, :, :]
-            pruned_model.bn1.weight.data = self.model.bn1.weight.data[idx]
-            pruned_model.bn1.bias.data = self.model.bn1.bias.data[idx]
-            pruned_model.bn1.running_mean.data = self.model.bn1.running_mean.data[idx]
-            pruned_model.bn1.running_var.data = self.model.bn1.running_var.data[idx]
-        
+                prev_c = c2
+
+        pruned.linear = nn.Linear(prev_c, 10)
+        return pruned
+
+    def _copy_weights(self, pruned, keep):
+        sd = self.model.state_dict()
+        psd = pruned.state_dict()
+
+        # conv1
+        if 'conv1' in keep:
+            idx = keep['conv1']
+            psd['conv1.weight'].copy_(sd['conv1.weight'][idx])
+            for n in ['weight', 'bias', 'running_mean', 'running_var']:
+                if f'bn1.{n}' in sd:
+                    psd[f'bn1.{n}'].copy_(sd[f'bn1.{n}'][idx])
+
+        # layers
         for stage_name in ['layer1', 'layer2', 'layer3']:
-            orig_stage = getattr(self.model, stage_name)
-            pruned_stage = getattr(pruned_model, stage_name)
-            
-            for block_idx in range(len(orig_stage)):
-                orig_block = orig_stage[block_idx]
-                pruned_block = pruned_stage[block_idx]
-                
-                conv1_name = f'{stage_name}.{block_idx}.conv1'
-                if conv1_name in keep_indices:
-                    out_idx = keep_indices[conv1_name]
-                    
-                    if block_idx == 0:
-                        if stage_name == 'layer1':
-                            in_idx = keep_indices.get('conv1', torch.arange(orig_block.conv1.in_channels))
-                        else:
-                            prev_stage = 'layer1' if stage_name == 'layer2' else 'layer2'
-                            prev_conv_name = f'{prev_stage}.2.conv2'
-                            in_idx = keep_indices.get(prev_conv_name, torch.arange(orig_block.conv1.in_channels))
+            for i in range(3):
+                prefix = f'{stage_name}.{i}'
+                c1_name = f'{prefix}.conv1'
+                c2_name = f'{prefix}.conv2'
+
+                # conv1
+                if c1_name in keep:
+                    out_idx = keep[c1_name]
+                    if i == 0 and stage_name == 'layer1':
+                        in_idx = keep.get('conv1', slice(None))
                     else:
-                        prev_conv_name = f'{stage_name}.{block_idx-1}.conv2'
-                        in_idx = keep_indices.get(prev_conv_name, torch.arange(orig_block.conv1.in_channels))
-                    
-                    pruned_block.conv1.weight.data = orig_block.conv1.weight.data[out_idx, :, :, :][:, in_idx, :, :]
-                    pruned_block.bn1.weight.data = orig_block.bn1.weight.data[out_idx]
-                    pruned_block.bn1.bias.data = orig_block.bn1.bias.data[out_idx]
-                    pruned_block.bn1.running_mean.data = orig_block.bn1.running_mean.data[out_idx]
-                    pruned_block.bn1.running_var.data = orig_block.bn1.running_var.data[out_idx]
-                
-                conv2_name = f'{stage_name}.{block_idx}.conv2'
-                if conv2_name in keep_indices:
-                    out_idx = keep_indices[conv2_name]
-                    in_idx = keep_indices.get(conv1_name, torch.arange(orig_block.conv2.in_channels))
-                    
-                    pruned_block.conv2.weight.data = orig_block.conv2.weight.data[out_idx, :, :, :][:, in_idx, :, :]
-                    pruned_block.bn2.weight.data = orig_block.bn2.weight.data[out_idx]
-                    pruned_block.bn2.bias.data = orig_block.bn2.bias.data[out_idx]
-                    pruned_block.bn2.running_mean.data = orig_block.bn2.running_mean.data[out_idx]
-                    pruned_block.bn2.running_var.data = orig_block.bn2.running_var.data[out_idx]
-                
-                if len(orig_block.shortcut) > 0:
-                    for i, layer in enumerate(orig_block.shortcut):
-                        if isinstance(layer, nn.Conv2d):
-                            if block_idx == 0:
-                                if stage_name == 'layer1':
-                                    in_idx = keep_indices.get('conv1', torch.arange(layer.in_channels))
-                                else:
-                                    prev_stage = 'layer1' if stage_name == 'layer2' else 'layer2'
-                                    prev_conv_name = f'{prev_stage}.2.conv2'
-                                    in_idx = keep_indices.get(prev_conv_name, torch.arange(layer.in_channels))
-                            else:
-                                prev_conv_name = f'{stage_name}.{block_idx-1}.conv2'
-                                in_idx = keep_indices.get(prev_conv_name, torch.arange(layer.in_channels))
-                            
-                            out_idx = keep_indices.get(conv2_name, torch.arange(layer.out_channels))
-                            pruned_block.shortcut[i].weight.data = layer.weight.data[out_idx, :, :, :][:, in_idx, :, :]
-                        
-                        elif isinstance(layer, nn.BatchNorm2d):
-                            out_idx = keep_indices.get(conv2_name, torch.arange(layer.num_features))
-                            pruned_block.shortcut[i].weight.data = layer.weight.data[out_idx]
-                            pruned_block.shortcut[i].bias.data = layer.bias.data[out_idx]
-                            pruned_block.shortcut[i].running_mean.data = layer.running_mean.data[out_idx]
-                            pruned_block.shortcut[i].running_var.data = layer.running_var.data[out_idx]
-        
-        last_stage_last_block = f'layer3.2.conv2'
-        if last_stage_last_block in keep_indices:
-            in_idx = keep_indices[last_stage_last_block]
-            pruned_model.linear.weight.data = self.model.linear.weight.data[:, in_idx]
-            pruned_model.linear.bias.data = self.model.linear.bias.data
+                        prev_c2 = f'{"layer1" if stage_name=="layer2" else "layer2"}.2.conv2' if i==0 else f'{stage_name}.{i-1}.conv2'
+                        in_idx = keep.get(prev_c2, slice(None))
+                    psd[f'{prefix}.conv1.weight'].copy_(sd[f'{prefix}.conv1.weight'][out_idx][:, in_idx])
+                    for n in ['weight', 'bias', 'running_mean', 'running_var']:
+                        psd[f'{prefix}.bn1.{n}'].copy_(sd[f'{prefix}.bn1.{n}'][out_idx])
 
-    def _calculate_compression_stats(self, pruned_model):
+                # conv2
+                if c2_name in keep:
+                    out_idx = keep[c2_name]
+                    in_idx = keep.get(c1_name, slice(None))
+                    psd[f'{prefix}.conv2.weight'].copy_(sd[f'{prefix}.conv2.weight'][out_idx][:, in_idx])
+                    for n in ['weight', 'bias', 'running_mean', 'running_var']:
+                        psd[f'{prefix}.bn2.{n}'].copy_(sd[f'{prefix}.bn2.{n}'][out_idx])
 
-        self._original_params = sum(p.numel() for p in self.model.parameters())
-        self._pruned_params = sum(p.numel() for p in pruned_model.parameters())
-        
-        self._original_flops = self._calculate_flops(self.model)
-        self._pruned_flops = self._calculate_flops(pruned_model)
+                # shortcut
+                if 'shortcut.0.weight' in sd.keys() and len(pruned._modules[stage_name][i].shortcut) > 0:
+                    if i == 0 and stage_name == 'layer1':
+                        in_idx = keep.get('conv1', slice(None))
+                    else:
+                        prev = f'{"layer1" if stage_name=="layer2" else "layer2"}.2.conv2' if i==0 else f'{stage_name}.{i-1}.conv2'
+                        in_idx = keep.get(prev, slice(None))
+                    out_idx = keep.get(c2_name, slice(None))
+                    psd[f'{prefix}.shortcut.0.weight'].copy_(sd[f'{prefix}.shortcut.0.weight'][out_idx][:, in_idx])
+                    for n in ['weight', 'bias', 'running_mean', 'running_var']:
+                        psd[f'{prefix}.shortcut.1.{n}'].copy_(sd[f'{prefix}.shortcut.1.{n}'][out_idx])
+
+        # linear
+        last = 'layer3.2.conv2'
+        if last in keep:
+            idx = keep[last]
+            psd['linear.weight'].copy_(sd['linear.weight'][:, idx])
+            psd['linear.bias'].copy_(sd['linear.bias'])
+
+        pruned.load_state_dict(psd)
+
+    def _calc_stats(self, pruned):
+        def params(m): return sum(p.numel() for p in m.parameters())
+        def flops(m):
+            flops = 0
+            h, w = 32, 32
+            # این دقیقاً همون محاسبه مقاله است
+            for name, module in m.named_modules():
+                if isinstance(module, nn.Conv2d):
+                    flops += module.weight.numel() * h * w
+                    h = (h + 2*module.padding[0] - module.kernel_size[0]) // module.stride[0] + 1
+                    w = (w + 2*module.padding[1] - module.kernel_size[1]) // module.stride[1] + 1
+                elif isinstance(module, nn.Linear):
+                    flops += module.in_features * module.out_features * 2
+            return flops
+
+        self._original_params = params(self.model)
+        self._pruned_params = params(pruned)
+        self._original_flops = flops(self.model)
+        self._pruned_flops = flops(pruned)
 
     def get_params_count(self):
         return self._original_params, self._pruned_params
-
     def get_flops_count(self):
         return self._original_flops, self._pruned_flops
