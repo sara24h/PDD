@@ -5,7 +5,10 @@ import numpy as np
 
 
 class PDDTrainer:
-  
+    """
+    Pruning During Distillation (PDD) Trainer
+    Exact implementation based on the paper
+    """
     def __init__(self, student, teacher, train_loader, test_loader, device, args):
         self.student = student
         self.teacher = teacher
@@ -41,15 +44,23 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-       
+        """
+        Initialize learnable masks
+        Paper: "randomly initialized"
+        
+        Strategy: Start positive to keep channels initially, let network learn to prune
+        This prevents aggressive early pruning
+        """
         masks = {}
         
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # Initialize with smaller variance to start near threshold
-                # This allows masks to learn whether to keep or prune
+                # Initialize with positive bias to start with most channels kept
+                # std=0.2 keeps variance small, mean=0.5 biases toward keeping
+                # This gives: mean ≈ 0.5, range ≈ [0, 1]
+                # After ApproxSign: most values > 0.5 (kept)
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.3,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.2 + 0.5,
                     requires_grad=True
                 )
                 masks[name] = mask
@@ -57,7 +68,15 @@ class PDDTrainer:
         return masks
 
     def _approx_sign(self, x):
-      
+        """
+        Differentiable approximation of sign function
+        
+        Equation (2) from the paper:
+                    { 0                    if x < -1
+        ApproxSign = { (x+1)²/2            if -1 ≤ x < 0
+                    { (2x - x² + 1)/2      if 0 ≤ x < 1
+                    { 1                    otherwise
+        """
         result = torch.zeros_like(x)
         
         # x < -1: output = 0
