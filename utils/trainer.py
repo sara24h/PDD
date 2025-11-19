@@ -115,9 +115,16 @@ class PDDTrainer:
                 
                 # Shortcut connection
                 if len(block.shortcut) > 0:
-                    identity = block.shortcut(identity)
-                
-                # Add residual and apply ReLU
+                    identity_out = block.shortcut(identity)
+                    if hasattr(block.shortcut, '0') and isinstance(block.shortcut[0], nn.Conv2d):
+                        shortcut_conv_name = f'{layer_name}.{i}.shortcut.0'
+                        if shortcut_conv_name in self.masks:
+                            mask = self._approx_sign(self.masks[shortcut_conv_name])
+                            identity_out = identity_out * mask
+                    identity = identity_out
+                else:
+                    identity = identity
+
                 out += identity
                 out = F.relu(out)
         
