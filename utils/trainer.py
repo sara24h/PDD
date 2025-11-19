@@ -40,12 +40,7 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-        """
-        Initialize learnable masks for each convolutional layer
-        
-        Paper: "First of all, we randomly initialized each mask x_i"
-        No special scaling mentioned - just standard normal distribution
-        """
+    
         masks = {}
         
         for name, module in self.student.named_modules():
@@ -95,13 +90,7 @@ class PDDTrainer:
         return result
 
     def _forward_with_masks(self, x):
-        """
-        Forward pass with mask application (Equation 3 from paper)
-        
-        The paper defines: z_s = h_n(h_{n-1}(...h_0(M)·A(x_0)...)·A(x_{n-1}))·A(x_n)
-        where A(·) is the ApproxSign function
-        """
-        # Conv1 + BN + ReLU
+    
         out = self.student.conv1(x)
         out = self.student.bn1(out)
         out = F.relu(out)
@@ -217,8 +206,7 @@ class PDDTrainer:
                 
                 # Total loss (Equation 4: L_total = L(z_s, z_t) + CE(z_s, Y))
                 # Added regularization term with weight 0.1
-                total_loss = (self.args.alpha * kd_loss + 
-                             (1 - self.args.alpha) * ce_loss 
+                total_loss = (self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss)
                 
                 # Backward pass and optimization
                 total_loss.backward()
