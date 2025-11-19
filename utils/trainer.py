@@ -224,7 +224,7 @@ class PDDTrainer:
             self.scheduler.step()
 
             # Calculate current pruning ratio (using threshold=0 as per paper)
-            pruning_ratio = self._calculate_pruning_ratio(threshold=0.0)
+            #pruning_ratio = self._calculate_pruning_ratio(threshold=0.0)
             
             # Print epoch statistics
             print(f"\nEpoch [{epoch+1}/{self.args.epochs}]")
@@ -233,7 +233,7 @@ class PDDTrainer:
             print(f"Losses: KD={kd_loss_total/len(self.train_loader):.4f}, "
                   f"CE={ce_loss_total/len(self.train_loader):.4f}, ")
                   #f"Reg={reg_loss_total/len(self.train_loader):.6f}")
-            print(f"Pruning Ratio (score=0): {pruning_ratio:.2f}%")
+            #print(f"Pruning Ratio (score=0): {pruning_ratio:.2f}%")
             
             # Save best model based on test accuracy
             if test_acc > self.best_acc:
@@ -252,7 +252,7 @@ class PDDTrainer:
         print("\n" + "="*70)
         print("Training Complete!")
         print(f"Best Accuracy: {self.best_acc:.2f}%")
-        print(f"Final Pruning (score=0): {self._calculate_pruning_ratio(threshold=0.0):.2f}%")
+        #print(f"Final Pruning (score=0): {self._calculate_pruning_ratio(threshold=0.0):.2f}%")
         print("="*70 + "\n")
 
     def evaluate(self):
@@ -273,22 +273,7 @@ class PDDTrainer:
         
         return 100. * correct / total
 
-    def _calculate_pruning_ratio(self, threshold=0.0):
-        
-        total_channels = 0
-        pruned_channels = 0
-        
-        for mask in self.masks.values():
-            # Apply ApproxSign to get values in [0, 1]
-            binary_mask = self._approx_sign(mask)
-            total_channels += binary_mask.numel()
-            # Count channels at or below threshold as pruned
-            pruned_channels += (binary_mask <= threshold).sum().item()
-        
-        if total_channels == 0:
-            return 0.0
-        
-        return 100. * pruned_channels / total_channels
+    
 
     def get_masks(self, threshold=0.0):
       
