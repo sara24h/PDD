@@ -3,24 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
 class PDDTrainer:
-    """
-    Pruning During Distillation (PDD) Trainer
-    EXACT implementation based on the paper:
-    "PDD: Pruning Neural Networks During Knowledge Distillation"
-    Cognitive Computation (2024) 16:3457–3467
-    """
+   
     def __init__(self, student, teacher, train_loader, test_loader, device, args):
-        self.student = student
-        self.teacher = teacher
+        self.student = student.to(device)
+        self.teacher = teacher.to(device)
         self.train_loader = train_loader
         self.test_loader = test_loader
         self.device = device
         self.args = args
         
         # Initialize masks
-        self.mask = nn.Parameter(torch.randn(size, requires_grad=True)*0.001)
+        self.masks = self._initialize_masks()
         
         # ✅ Single optimizer for both model and masks (Equation 4)
         mask_params = list(self.masks.values())
@@ -46,13 +40,7 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-        """
-        Initialize learnable masks
-        Paper: "randomly initialized" (Page 3460)
-        
-        Implementation: Random initialization from normal distribution
-        This allows the network to learn which channels to keep/prune
-        """
+      
         masks = {}
         
         for name, module in self.student.named_modules():
@@ -60,7 +48,7 @@ class PDDTrainer:
                 # Random initialization as stated in paper
                 # Using standard normal distribution
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device),
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.001,
                     requires_grad=True
                 )
                 masks[name] = mask
@@ -68,36 +56,10 @@ class PDDTrainer:
         return masks
 
     def _approx_sign(self, x):
-        """
-        Differentiable approximation of sign function
-        
-        ✅ EXACT Equation (2) from the paper (Page 3461):
-                    ⎧ 0                    if x < -1
-        ApproxSign = ⎨ (x+1)²/2            if -1 ≤ x < 0
-                    ⎨ (2x - x² + 1)/2      if 0 ≤ x < 1
-                    ⎩ 1                    otherwise
-        
-        This function is differentiable and approximates the sign function.
-        """
-        result = torch.zeros_like(x)
-        
-        # x < -1: output = 0
-        mask1 = (x < -1).float()
-        result = result + mask1 * 0.0
-        
-        # -1 ≤ x < 0: output = (x+1)²/2
-        mask2 = ((x >= -1) & (x < 0)).float()
-        result = result + mask2 * ((x + 1) ** 2 / 2)
-        
-        # 0 ≤ x < 1: output = (2x - x² + 1)/2
-        mask3 = ((x >= 0) & (x < 1)).float()
-        result = result + mask3 * (2 * x - x**2 + 1) / 2
-        
-        # x ≥ 1: output = 1
-        mask4 = (x >= 1).float()
-        result = result + mask4 * 1.0
-        
-        return result
+      
+        return torch.where(x < -1, torch.zeros_like(x),
+                           torch.where(x < 0, (x + 1)**2 / 2,
+                                       torch.where(x < 1, (2*x - x**2 + 1)/2, torch.ones_like(x))))
 
     def _forward_with_masks(self, x):
         """
@@ -111,17 +73,15 @@ class PDDTrainer:
         - A(x_i): ApproxSign function applied to mask x_i
         - M: input image
         
-        The mask is applied AFTER each convolutional layer output
+        The mask is applied AFTER each convolutional layer output but before BN/ReLU
         """
-        # Conv1 + BN + ReLU
+        # Conv1
         out = self.student.conv1(x)
-        out = self.student.bn1(out)
-        out = F.relu(out)
-        
-        # Apply mask to conv1 output (A(x_0) in equation)
         if 'conv1' in self.masks:
             mask = self._approx_sign(self.masks['conv1'])
             out = out * mask
+        out = self.student.bn1(out)
+        out = F.relu(out)
         
         # Process each stage (layer1, layer2, layer3)
         for layer_name in ['layer1', 'layer2', 'layer3']:
@@ -131,24 +91,20 @@ class PDDTrainer:
                 
                 # Conv1 of block
                 out = block.conv1(out)
-                out = block.bn1(out)
-                out = F.relu(out)
-                
-                # Apply mask to conv1 output
                 mask_name = f'{layer_name}.{i}.conv1'
                 if mask_name in self.masks:
                     mask = self._approx_sign(self.masks[mask_name])
                     out = out * mask
+                out = block.bn1(out)
+                out = F.relu(out)
                 
                 # Conv2 of block
                 out = block.conv2(out)
-                out = block.bn2(out)
-                
-                # Apply mask to conv2 output
                 mask_name = f'{layer_name}.{i}.conv2'
                 if mask_name in self.masks:
                     mask = self._approx_sign(self.masks[mask_name])
                     out = out * mask
+                out = block.bn2(out)
                 
                 # Shortcut connection
                 if len(block.shortcut) > 0:
@@ -168,30 +124,16 @@ class PDDTrainer:
         return out
 
     def train(self):
-        """
-        Train the student model with pruning during distillation
-        
-        ✅ EXACT Equation (4) from the paper (Page 3461):
-        L_total = L(z̃_s, z_t) + CE(z̃_s, Y)
-        
-        where:
-        - L(z̃_s, z_t): Knowledge distillation loss (KL divergence)
-        - CE(z̃_s, Y): Cross-entropy classification loss
-        - z̃_s: Student output with masks applied
-        - z_t: Teacher output
-        - Y: Ground truth labels
-        
-        Note: Paper mentions 50 epochs for distillation (Page 3461)
-        """
+     
         print("\n" + "="*70)
         print("Starting Pruning During Distillation (PDD) - EXACT Paper Implementation")
         print("="*70)
-        print(f"Temperature:        {self.args.temperature}")
-        print(f"Alpha (distill):    {self.args.alpha}")
-        print(f"Learning Rate:      {self.args.lr}")
-        print(f"Epochs:             {self.args.epochs}")
-        print(f"LR Decay:           {self.args.lr_decay_epochs}")
-        print(f"Total Masks:        {len(self.masks)}")
+        print(f"Temperature: {self.args.temperature}")
+        print(f"Alpha (distill): {self.args.alpha}")
+        print(f"Learning Rate: {self.args.lr}")
+        print(f"Epochs: {self.args.epochs}")
+        print(f"LR Decay: {self.args.lr_decay_epochs}")
+        print(f"Total Masks: {len(self.masks)}")
         print("="*70 + "\n")
         
         for epoch in range(self.args.epochs):
@@ -250,7 +192,6 @@ class PDDTrainer:
             
             # Update learning rate
             self.scheduler.step()
-
             # ✅ Calculate pruning ratio - EXACT as per paper
             # Paper (Page 3461): "a score of 0 indicates that the channel is redundant"
             # Score = 0 when raw mask < -1 (from ApproxSign function)
@@ -259,7 +200,7 @@ class PDDTrainer:
             # Print epoch statistics
             print(f"\nEpoch [{epoch+1}/{self.args.epochs}]")
             print(f"Train: Loss={train_loss/len(self.train_loader):.4f}, Acc={train_acc:.2f}%")
-            print(f"Test:  Acc={test_acc:.2f}%")
+            print(f"Test: Acc={test_acc:.2f}%")
             print(f"Losses: KD={kd_loss_total/len(self.train_loader):.4f}, "
                   f"CE={ce_loss_total/len(self.train_loader):.4f}")
             print(f"Pruning Ratio: {pruning_ratio:.2f}%")
@@ -270,7 +211,7 @@ class PDDTrainer:
             # Save best model based on test accuracy
             if test_acc > self.best_acc:
                 self.best_acc = test_acc
-                self.best_masks = {name: mask.clone().detach() 
+                self.best_masks = {name: mask.clone().detach()
                                   for name, mask in self.masks.items()}
                 if (epoch + 1) % 5 == 0 or epoch == 0:
                     print(f"✓ New best accuracy: {test_acc:.2f}%")
@@ -305,10 +246,10 @@ class PDDTrainer:
             # Count channels with score = 0 (raw < -1)
             pruned_counts.append((raw < -1).sum().item())
         
-        print(f"  Raw Masks: Avg={np.mean(raw_means):.3f}, "
+        print(f" Raw Masks: Avg={np.mean(raw_means):.3f}, "
               f"Min={np.min(raw_mins):.3f}, Max={np.max(raw_maxs):.3f}")
-        print(f"  After ApproxSign: Avg={np.mean(approx_means):.3f}")
-        print(f"  Channels with score=0 (raw<-1): {np.sum(pruned_counts)}")
+        print(f" After ApproxSign: Avg={np.mean(approx_means):.3f}")
+        print(f" Channels with score=0 (raw<-1): {np.sum(pruned_counts)}")
 
     def evaluate(self):
         """Evaluate the student model on test set"""
@@ -372,21 +313,9 @@ class PDDTrainer:
         return binary_masks
     
     def prune_model(self):
-        """
-        Prune the student model based on learned masks
-        
-        After training, this method removes channels with score = 0
-        and returns a compact model ready for deployment
-        """
+       
         binary_masks = self.get_masks()
-        
-        # This is a placeholder for actual structural pruning
-        # In practice, you would:
-        # 1. Identify channels to keep based on binary_masks
-        # 2. Create a new model with reduced channels
-        # 3. Copy weights from unpruned channels
-        # 4. Return the compact model
-        
+   
         print("\n" + "="*70)
         print("Model Pruning Summary")
         print("="*70)
@@ -405,7 +334,7 @@ class PDDTrainer:
         print("="*70)
         print(f"Overall: {int(total_kept)}/{int(total_original)} channels kept "
               f"({100*total_kept/total_original:.2f}%)")
-        print(f"Pruned:  {int(total_original-total_kept)}/{int(total_original)} channels removed "
+        print(f"Pruned: {int(total_original-total_kept)}/{int(total_original)} channels removed "
               f"({100*(total_original-total_kept)/total_original:.2f}%)")
         print("="*70 + "\n")
         
