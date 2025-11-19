@@ -174,7 +174,7 @@ class PDDTrainer:
             train_loss = 0.0
             kd_loss_total = 0.0
             ce_loss_total = 0.0
-            reg_loss_total = 0.0
+            #reg_loss_total = 0.0
             correct = 0
             total = 0
             
@@ -202,24 +202,23 @@ class PDDTrainer:
                 
                 # 3. Sparsity regularization (L1 on binary masks)
                 # This encourages masks to be either 0 (pruned) or 1 (kept)
-                reg_loss = 0.0
+                #reg_loss = 0.0
                 total_mask_elements = 0
                 for mask in self.masks.values():
                     # Apply ApproxSign to get binary-like values [0, 1]
                     binary_mask = self._approx_sign(mask)
                     # L1 regularization: encourages sparsity
-                    reg_loss += torch.sum(binary_mask)
+                    #reg_loss += torch.sum(binary_mask)
                     total_mask_elements += binary_mask.numel()
                 
                 # Normalize regularization by total number of mask elements
-                if total_mask_elements > 0:
-                    reg_loss = reg_loss / total_mask_elements
+                #if total_mask_elements > 0:
+                    #reg_loss = reg_loss / total_mask_elements
                 
                 # Total loss (Equation 4: L_total = L(z_s, z_t) + CE(z_s, Y))
                 # Added regularization term with weight 0.1
                 total_loss = (self.args.alpha * kd_loss + 
-                             (1 - self.args.alpha) * ce_loss + 
-                             0.001 * reg_loss)
+                             (1 - self.args.alpha) * ce_loss 
                 
                 # Backward pass and optimization
                 total_loss.backward()
@@ -229,7 +228,7 @@ class PDDTrainer:
                 train_loss += total_loss.item()
                 kd_loss_total += kd_loss.item()
                 ce_loss_total += ce_loss.item()
-                reg_loss_total += reg_loss.item()
+                #reg_loss_total += reg_loss.item()
                 
                 _, predicted = student_outputs.max(1)
                 total += targets.size(0)
@@ -252,7 +251,7 @@ class PDDTrainer:
             print(f"Test:  Acc={test_acc:.2f}%")
             print(f"Losses: KD={kd_loss_total/len(self.train_loader):.4f}, "
                   f"CE={ce_loss_total/len(self.train_loader):.4f}, "
-                  f"Reg={reg_loss_total/len(self.train_loader):.6f}")
+                  #f"Reg={reg_loss_total/len(self.train_loader):.6f}")
             print(f"Pruning Ratio (score=0): {pruning_ratio:.2f}%")
             
             # Save best model based on test accuracy
@@ -294,15 +293,7 @@ class PDDTrainer:
         return 100. * correct / total
 
     def _calculate_pruning_ratio(self, threshold=0.0):
-        """
-        Calculate the current pruning ratio
         
-        Paper: "a score of 0 indicates that the channel is redundant"
-        So we use threshold=0.0 (not 0.5)
-        
-        Args:
-            threshold: value below which channels are considered pruned (default: 0.0)
-        """
         total_channels = 0
         pruned_channels = 0
         
@@ -319,18 +310,7 @@ class PDDTrainer:
         return 100. * pruned_channels / total_channels
 
     def get_masks(self, threshold=0.0):
-        """
-        Get the current masks as binary (0 or 1) based on threshold
-        
-        Paper: "a score of 0 indicates that the channel is redundant"
-        So threshold=0.0 (not 0.5)
-        
-        Args:
-            threshold: channels with score <= threshold will be pruned (default: 0.0)
-        
-        Returns:
-            Dictionary of binary masks (0 = prune, 1 = keep)
-        """
+      
         binary_masks = {}
         for name, mask in self.masks.items():
             # Apply ApproxSign to get values in [0, 1]
