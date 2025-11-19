@@ -219,7 +219,7 @@ class PDDTrainer:
                 # Added regularization term with weight 0.1
                 total_loss = (self.args.alpha * kd_loss + 
                              (1 - self.args.alpha) * ce_loss + 
-                             0.1 * reg_loss)
+                             0.001 * reg_loss)
                 
                 # Backward pass and optimization
                 total_loss.backward()
