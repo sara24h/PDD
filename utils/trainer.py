@@ -48,7 +48,7 @@ class PDDTrainer:
                 # Random initialization as stated in paper
                 # Using standard normal distribution
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.5,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) ,
                     requires_grad=True
                 )
                 masks[name] = mask
