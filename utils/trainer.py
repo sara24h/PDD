@@ -20,7 +20,7 @@ class PDDTrainer:
         self.args = args
         
         # Initialize masks
-        self.masks = self._initialize_masks()
+        self.mask = nn.Parameter(torch.randn(size, requires_grad=True)*0.001)
         
         # ✅ Single optimizer for both model and masks (Equation 4)
         mask_params = list(self.masks.values())
