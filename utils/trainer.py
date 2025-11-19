@@ -16,7 +16,7 @@ class PDDTrainer:
         # Initialize masks
         self.masks = self._initialize_masks()
         
-        # Optimizer - فقط پارامترهای مدل و ماسک‌ها
+        # ✅ طبق مقاله: یک optimizer برای همه پارامترها
         mask_params = [mask for mask in self.masks.values()]
         
         self.optimizer = torch.optim.SGD(
@@ -40,15 +40,18 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-        """Initialize learnable masks - مطابق مقاله"""
+        """✅ Initialize learnable masks - با مقداردهی بهتر
+        
+        کلید: شروع از مقادیر مثبت تا ماسک‌ها در ابتدا نزدیک 1 باشند
+        """
         masks = {}
         
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # مقاله: مقداردهی تصادفی با توزیع نرمال
-                # اما نه خیلی کوچک که همه صفر شوند
+                # ✅ مقداردهی با میانگین مثبت (نزدیک 1)
+                # این باعث می‌شود در ابتدا کانال‌ها حفظ شوند
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.5,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.2 + 1.0,
                     requires_grad=True
                 )
                 masks[name] = mask
@@ -150,9 +153,9 @@ class PDDTrainer:
         return out
 
     def train(self):
-        """Train the student model with pruning during distillation"""
+        """✅ Train the student model - طبق مقاله بدون regularization اضافی"""
         print("\n" + "="*70)
-        print("Starting Pruning During Distillation (PDD)")
+        print("Starting Pruning During Distillation (PDD) - Paper Implementation")
         print("="*70)
         print(f"Temperature:        {self.args.temperature}")
         print(f"Alpha (distill):    {self.args.alpha}")
@@ -183,7 +186,7 @@ class PDDTrainer:
                 with torch.no_grad():
                     teacher_outputs = self.teacher(inputs)
                 
-                # Calculate losses
+                # ✅ Calculate losses - فقط KD + CE (بدون regularization)
                 # 1. Classification loss (Cross Entropy)
                 ce_loss = self.criterion(student_outputs, targets)
                 
@@ -192,8 +195,8 @@ class PDDTrainer:
                 soft_student = F.log_softmax(student_outputs / self.args.temperature, dim=1)
                 kd_loss = self.kd_criterion(soft_student, soft_teacher) * (self.args.temperature ** 2)
                 
-                # 3. Total loss (Equation 4 from paper) - بدون regularization اضافی
-                # مقاله فقط از KD loss + CE loss استفاده می‌کند
+                # 3. Total loss (Equation 4 from paper)
+                # ✅ فقط KD + CE بدون هیچ regularization اضافی
                 total_loss = self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss
                 
                 # Backward pass
@@ -226,6 +229,9 @@ class PDDTrainer:
                   f"CE={ce_loss_total/len(self.train_loader):.4f}")
             print(f"Pruning Ratio: {pruning_ratio:.2f}%")
             
+            # نمایش آمار ماسک‌ها
+            self._print_mask_stats()
+            
             # Save best model
             if test_acc > self.best_acc:
                 self.best_acc = test_acc
@@ -244,6 +250,23 @@ class PDDTrainer:
         print(f"Best Accuracy: {self.best_acc:.2f}%")
         print(f"Final Pruning: {self._calculate_pruning_ratio():.2f}%")
         print("="*70 + "\n")
+
+    def _print_mask_stats(self):
+        """نمایش آمار ماسک‌ها برای دیباگ"""
+        mask_means = []
+        mask_mins = []
+        mask_maxs = []
+        
+        for mask in self.masks.values():
+            mask_means.append(mask.mean().item())
+            mask_mins.append(mask.min().item())
+            mask_maxs.append(mask.max().item())
+        
+        avg_mask = np.mean(mask_means)
+        min_mask = np.min(mask_mins)
+        max_mask = np.max(mask_maxs)
+        
+        print(f"  Mask Stats: Avg={avg_mask:.3f}, Min={min_mask:.3f}, Max={max_mask:.3f}")
 
     def evaluate(self):
         """Evaluate the student model"""
@@ -270,7 +293,6 @@ class PDDTrainer:
         for mask in self.masks.values():
             binary_mask = self._approx_sign(mask)
             total_channels += mask.numel()
-            # کانال‌هایی که کمتر از 0.5 هستند، هرس شده‌اند
             pruned_channels += (binary_mask < 0.5).sum().item()
         
         if total_channels == 0:
@@ -279,11 +301,9 @@ class PDDTrainer:
         return 100. * pruned_channels / total_channels
 
     def get_masks(self):
-        """Get the current masks as binary (0 or 1) با threshold=0.5"""
+        """دریافت ماسک‌های باینری نهایی"""
         binary_masks = {}
         for name, mask in self.masks.items():
-            # اعمال ApproxSign و تبدیل به باینری
             binary_mask = self._approx_sign(mask)
-            # Threshold در 0.5 (مطابق مقاله)
             binary_masks[name] = (binary_mask > 0.5).float()
         return binary_masks
