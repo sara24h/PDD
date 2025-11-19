@@ -41,16 +41,17 @@ class PDDTrainer:
 
     def _initialize_masks(self):
         masks = {}
+        print("Creating masks for these layers:")
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-
+            # فقط اسم ماژول رو چاپ کن تا ببینیم واقعاً چی هست
+                print(f"  → {name} | out_channels: {module.out_channels}")
                 mask = nn.Parameter(
-                    torch.empty(1, module.out_channels, 1, 1, device=self.device).uniform_(-1.0, 0.5),
+                    torch.empty(1, module.out_channels, 1, 1, device=self.device).uniform_(-1.2, 0.3),
                     requires_grad=True
                 )
                 masks[name] = mask
-                print(f"Mask created for: {name}")  # برای دیباگ
-        print(f"Total masks created: {len(masks)}")  # باید 27 بشه
+        print(f"Total masks created: {len(masks)}")
         return masks
 
     def _approx_sign(self, x):
