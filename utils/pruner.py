@@ -4,12 +4,7 @@ import torch.nn as nn
 
 class ModelPruner:
     def __init__(self, model, masks, threshold=0.0):
-        """
-        Args:
-            model: مدل اصلی (student model)
-            masks: دیکشنری ماسک‌ها (مقادیر بین 0 و 1) برای هر لایه
-            threshold: آستانه برای pruning (paper: 0.0 = score of 0 means prune)
-        """
+    
         self.model = model
         self.masks = masks
         self.threshold = threshold
@@ -100,12 +95,7 @@ class ModelPruner:
         return total_flops
 
     def prune(self):
-        """
-        حذف کانال‌های redundant بر اساس ماسک‌ها
-        
-        Paper: "a score of 0 indicates that the channel is redundant and can be pruned"
-        Therefore: channels with mask value <= threshold are pruned
-        """
+      
         print(f"\nAnalyzing masks (threshold={self.threshold})...")
         
         keep_indices = {}
@@ -114,7 +104,7 @@ class ModelPruner:
         for name, mask in self.masks.items():
             mask_flat = mask.squeeze().cpu()
             # Paper: score > threshold → keep, score <= threshold → prune
-            keep_idx = torch.where(mask_flat > self.threshold)[0]
+            keep_idx = torch.where(mask_flat > 1e-5)[0] 
             total_channels = mask_flat.numel()
             kept_channels = len(keep_idx)
             
@@ -281,7 +271,7 @@ class ModelPruner:
             pruned_model.linear.bias.data = self.model.linear.bias.data
 
     def _calculate_compression_stats(self, pruned_model):
-        """محاسبه آمار فشرده‌سازی"""
+
         self._original_params = sum(p.numel() for p in self.model.parameters())
         self._pruned_params = sum(p.numel() for p in pruned_model.parameters())
         
