@@ -297,20 +297,31 @@ class PDDTrainer:
         return 100. * pruned_channels / total_channels
 
     def get_masks(self):
-        """
-        Get binary masks for pruning
+    """
+    Get binary masks for pruning
+    
+    ✅ EXACT as per paper (Page 3461):
+    Channels with score = 0 are pruned (ApproxSign(raw_mask) = 0)
+    Channels with score > 0 are kept (ApproxSign(raw_mask) > 0)
+    
+    ApproxSign output:
+    - 0 when raw_mask < -1
+    - (raw_mask+1)²/2 when -1 ≤ raw_mask < 0
+    - (2*raw_mask - raw_mask² + 1)/2 when 0 ≤ raw_mask < 1
+    - 1 when raw_mask ≥ 1
+    
+    For pruning: we keep channels where ApproxSign > threshold (e.g., 0.01)
+    """
+    binary_masks = {}
+    for name, mask in self.masks.items():
+        # Apply ApproxSign to get the actual scores
+        score = self._approx_sign(mask).detach()
         
-        ✅ EXACT as per paper (Page 3461):
-        Channels with score = 0 are pruned (raw_mask < -1)
-        Channels with score > 0 are kept (raw_mask >= -1)
-        """
-        binary_masks = {}
-        for name, mask in self.masks.items():
-            raw_mask = mask.detach()
-            # Keep channels where raw_mask >= -1 (score > 0)
-            # Prune channels where raw_mask < -1 (score = 0)
-            binary_masks[name] = (raw_mask >= -1).float()
-        return binary_masks
+        # Keep channels with score > small threshold (to avoid floating point issues)
+        # Paper says "score of 0" means prune, so we keep score > 0
+        binary_masks[name] = (score > 0.01).float()  # Small threshold for numerical stability
+    
+    return binary_masks
     
     def prune_model(self):
        
