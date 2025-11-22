@@ -91,9 +91,7 @@ class ModelPruner:
         
         # Global Average Pooling
         total_flops += current_h * current_w * model.linear.in_features
-        
-        # Linear layer: 2 * in_features * out_features
-        # (ضرب و جمع برای هر خروجی)
+
         total_flops += 2 * model.linear.in_features * model.linear.out_features
         
         return total_flops
@@ -107,7 +105,7 @@ class ModelPruner:
         
         for name, mask in self.masks.items():
             mask_flat = mask.squeeze().cpu()
-            keep_idx = torch.where(mask_flat > 0.5)[0]
+            keep_idx = torch.where(mask_flat >= -1)[0] 
             total_channels = mask_flat.numel()
             kept_channels = len(keep_idx)
             
