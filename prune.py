@@ -1,16 +1,9 @@
-"""
-Pruning script for PDD (Pruning During Distillation)
-This file contains only the pruning phase
-"""
-
 import torch
 import argparse
 import os
-
 from models.resnet import resnet20
 from utils.pruner import ModelPruner
 from utils.helpers import save_checkpoint
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Prune PDD Model')
@@ -19,9 +12,7 @@ def parse_args():
                         help='Path to checkpoint with masks')
     parser.add_argument('--save_dir', type=str, default='./checkpoints',
                         help='Directory to save pruned model')
-    parser.add_argument('--threshold', type=float, default=0.5,
-                        help='Pruning threshold')
-    
+
     return parser.parse_args()
 
 
@@ -75,7 +66,9 @@ def main():
     kept_channels = 0
     
     for name, mask in masks.items():
-        mask_binary = (mask.squeeze() > args.threshold).float()
+        mask_flat = mask.squeeze()
+
+        mask_binary = (mask_flat >= -1.0).float()
         total = mask_binary.numel()
         kept = mask_binary.sum().item()
         
@@ -144,7 +137,6 @@ def main():
         'pruned_params': actual_params,
         'original_flops': original_flops,
         'pruned_flops': pruned_flops_est,
-        'threshold': args.threshold,
         'source_checkpoint': args.checkpoint
     }, save_path)
     
