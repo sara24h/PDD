@@ -7,7 +7,8 @@ class ModelPruner:
         """
         Args:
             model: مدل اصلی (student model)
-            masks: دیکشنری ماسک‌های باینری (0 یا 1) برای هر لایه
+            masks: دیکشنری ماسک‌های باینری که از trainer.get_masks() آمده
+                   (1 = keep channel, 0 = prune channel)
         """
         self.model = model
         self.masks = masks
@@ -19,27 +20,19 @@ class ModelPruner:
     def _calculate_flops(self, model):
         """محاسبه دقیق FLOPs برای ResNet روی CIFAR-10"""
         total_flops = 0
-        
-        # برای CIFAR-10: input size = 32x32
         h, w = 32, 32
         
-        # Conv1: 3x3 conv, stride=1, input=32x32
+        # Conv1
         layer = model.conv1
-        h_out, w_out = h, w  # stride=1, padding=1
-        # فرمول صحیح: K^2 * C_in * H_out * W_out * C_out
+        h_out, w_out = h, w
         flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
                  h_out * w_out * layer.out_channels)
         total_flops += flops
-        
-        # BN1: 2 operations per element
         total_flops += 2 * model.bn1.num_features * h_out * w_out
-        
-        # ReLU: 1 operation per element
         total_flops += h_out * w_out * model.bn1.num_features
         
         current_h, current_w = h_out, w_out
         
-        # پردازش هر stage
         for stage_name in ['layer1', 'layer2', 'layer3']:
             stage = getattr(model, stage_name)
             
@@ -54,8 +47,6 @@ class ModelPruner:
                 flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
                         h_out * w_out * layer.out_channels)
                 total_flops += flops
-                
-                # BN + ReLU
                 total_flops += 2 * block.bn1.num_features * h_out * w_out
                 total_flops += h_out * w_out * block.bn1.num_features
                 
@@ -69,13 +60,11 @@ class ModelPruner:
                 flops = (layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1] * 
                         h_out * w_out * layer.out_channels)
                 total_flops += flops
-                
-                # BN
                 total_flops += 2 * block.bn2.num_features * h_out * w_out
                 
                 current_h, current_w = h_out, w_out
                 
-                # Shortcut (if exists)
+                # Shortcut
                 if len(block.shortcut) > 0:
                     for layer in block.shortcut:
                         if isinstance(layer, nn.Conv2d):
@@ -85,27 +74,31 @@ class ModelPruner:
                         elif isinstance(layer, nn.BatchNorm2d):
                             total_flops += 2 * layer.num_features * current_h * current_w
                 
-                # Addition + ReLU
                 total_flops += current_h * current_w * block.bn2.num_features
                 total_flops += current_h * current_w * block.bn2.num_features
         
-        # Global Average Pooling
         total_flops += current_h * current_w * model.linear.in_features
-
         total_flops += 2 * model.linear.in_features * model.linear.out_features
         
         return total_flops
 
     def prune(self):
-        """حذف کانال‌های redundant بر اساس ماسک‌ها"""
+        """
+        ✅ حذف کانال‌های redundant بر اساس ماسک‌های باینری
+        ماسک‌ها از trainer.get_masks() می‌آیند که بر اساس raw_mask >= -1.0 ساخته شده‌اند
+        """
         print("\nAnalyzing masks...")
         
         keep_indices = {}
         pruning_stats = {}
         
         for name, mask in self.masks.items():
+            # ماسک از trainer به صورت binary است: 1=keep, 0=prune
             mask_flat = mask.squeeze().cpu()
-            keep_idx = torch.where(mask_flat >= -1)[0] 
+            
+            # ✅ کانال‌هایی که mask=1 دارند را نگه می‌داریم
+            keep_idx = torch.where(mask_flat == 1.0)[0]
+            
             total_channels = mask_flat.numel()
             kept_channels = len(keep_idx)
             
@@ -139,10 +132,11 @@ class ModelPruner:
         from models.resnet import ResNet, BasicBlock
         
         num_classes = self.model.linear.out_features
-        conv1_channels = stats['conv1']['kept'] if 'conv1' in stats else 16
+        conv1_channels = len(keep_indices['conv1']) if 'conv1' in keep_indices else 16
         
         pruned_model = ResNet(BasicBlock, [3, 3, 3], num_classes=num_classes)
         
+        # Update conv1
         if 'conv1' in keep_indices:
             kept = len(keep_indices['conv1'])
             pruned_model.conv1 = nn.Conv2d(3, kept, kernel_size=3, 
@@ -151,6 +145,7 @@ class ModelPruner:
         
         prev_channels = conv1_channels
         
+        # Update each stage
         for stage_idx, stage_name in enumerate(['layer1', 'layer2', 'layer3']):
             stage = getattr(pruned_model, stage_name)
             
@@ -175,6 +170,7 @@ class ModelPruner:
                                        padding=1, bias=False)
                 block.bn2 = nn.BatchNorm2d(conv2_out)
                 
+                # Update shortcut if needed
                 if stride != 1 or in_channels != conv2_out:
                     block.shortcut = nn.Sequential(
                         nn.Conv2d(in_channels, conv2_out, 
@@ -193,6 +189,7 @@ class ModelPruner:
     def _copy_weights(self, pruned_model, keep_indices):
         """کپی کردن وزن‌ها از مدل اصلی به مدل هرس شده"""
         
+        # Conv1
         if 'conv1' in keep_indices:
             idx = keep_indices['conv1']
             pruned_model.conv1.weight.data = self.model.conv1.weight.data[idx, :, :, :]
@@ -201,6 +198,7 @@ class ModelPruner:
             pruned_model.bn1.running_mean.data = self.model.bn1.running_mean.data[idx]
             pruned_model.bn1.running_var.data = self.model.bn1.running_var.data[idx]
         
+        # Process each stage
         for stage_name in ['layer1', 'layer2', 'layer3']:
             orig_stage = getattr(self.model, stage_name)
             pruned_stage = getattr(pruned_model, stage_name)
@@ -209,10 +207,12 @@ class ModelPruner:
                 orig_block = orig_stage[block_idx]
                 pruned_block = pruned_stage[block_idx]
                 
+                # Conv1 of block
                 conv1_name = f'{stage_name}.{block_idx}.conv1'
                 if conv1_name in keep_indices:
                     out_idx = keep_indices[conv1_name]
                     
+                    # Determine input indices
                     if block_idx == 0:
                         if stage_name == 'layer1':
                             in_idx = keep_indices.get('conv1', torch.arange(orig_block.conv1.in_channels))
@@ -230,6 +230,7 @@ class ModelPruner:
                     pruned_block.bn1.running_mean.data = orig_block.bn1.running_mean.data[out_idx]
                     pruned_block.bn1.running_var.data = orig_block.bn1.running_var.data[out_idx]
                 
+                # Conv2 of block
                 conv2_name = f'{stage_name}.{block_idx}.conv2'
                 if conv2_name in keep_indices:
                     out_idx = keep_indices[conv2_name]
@@ -241,6 +242,7 @@ class ModelPruner:
                     pruned_block.bn2.running_mean.data = orig_block.bn2.running_mean.data[out_idx]
                     pruned_block.bn2.running_var.data = orig_block.bn2.running_var.data[out_idx]
                 
+                # Shortcut
                 if len(orig_block.shortcut) > 0:
                     for i, layer in enumerate(orig_block.shortcut):
                         if isinstance(layer, nn.Conv2d):
@@ -265,6 +267,7 @@ class ModelPruner:
                             pruned_block.shortcut[i].running_mean.data = layer.running_mean.data[out_idx]
                             pruned_block.shortcut[i].running_var.data = layer.running_var.data[out_idx]
         
+        # Linear layer
         last_stage_last_block = f'layer3.2.conv2'
         if last_stage_last_block in keep_indices:
             in_idx = keep_indices[last_stage_last_block]
