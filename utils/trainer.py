@@ -296,36 +296,44 @@ class PDDTrainer:
         
         return 100. * pruned_channels / total_channels
 
-    def get_masks(self):
-        """
-        Get binary masks for pruning
-    
-        ✅ EXACT as per paper (Page 3461):
-        Channels with score = 0 are pruned (ApproxSign(raw_mask) = 0)
-        Channels with score > 0 are kept (ApproxSign(raw_mask) > 0)
-    
-         ApproxSign output:
-        - 0 when raw_mask < -1
-        - (raw_mask+1)²/2 when -1 ≤ raw_mask < 0
-        - (2*raw_mask - raw_mask² + 1)/2 when 0 ≤ raw_mask < 1
-        - 1 when raw_mask ≥ 1
-    
-        For pruning: we keep channels where ApproxSign > threshold (e.g., 0.01)
-        """
+    def get_masks(self, score_threshold=0.5):  # ✅ اضافه کردن پارامتر
+  
         binary_masks = {}
+    
+        print(f"\n🔍 Generating binary masks with score threshold = {score_threshold}")
+    
         for name, mask in self.masks.items():
-            # Apply ApproxSign to get the actual scores
-            score = self._approx_sign(mask).detach()
+        # Compute importance scores using ApproxSign
+            score = self._approx_sign(mask).detach().squeeze()
         
-            # Keep channels with score > small threshold (to avoid floating point issues)
-            # Paper says "score of 0" means prune, so we keep score > 0
-            binary_masks[name] = (score > 0.01).float()  # Small threshold for numerical stability
+        # Keep channels with high scores
+            binary_mask = (score >= score_threshold).float()
+        
+            binary_masks[name] = binary_mask
+        
+        # Debug info
+            kept = binary_mask.sum().item()
+            total = binary_mask.numel()
+            score_min = score.min().item()
+            score_max = score.max().item()
+            score_mean = score.mean().item()
+        
+            print(f"{name:30s}: {int(kept):3d}/{int(total):3d} kept | "
+                  f"Score: min={score_min:.3f}, mean={score_mean:.3f}, max={score_max:.3f}")
     
         return binary_masks
-    
+
+
     def prune_model(self, score_threshold=0.5):
+        """
+        Prune the model based on learned masks
     
-        binary_masks = self.get_masks(score_threshold)
+        Args:
+            score_threshold: Threshold for channel importance scores (default: 0.5)
+                            - Lower threshold = more aggressive pruning
+                            - Higher threshold = more conservative pruning
+        """
+        binary_masks = self.get_masks(score_threshold)  # ✅ حالا کار می‌کنه
     
         print("\n" + "="*70)
         print("Model Pruning Summary")
@@ -339,14 +347,14 @@ class PDDTrainer:
             total = mask.numel()
             total_original += total
             total_kept += kept
-            print(f"{name:30s}: {int(kept):4d}/{int(total):4d} channels kept "
-                  f"({100*kept/total:.1f}%)")
+            pruned_ratio = (1 - kept/total) * 100
+            print(f"{name:30s}: {int(kept):4d}/{int(total):4d} channels | "
+                  f"Pruned: {pruned_ratio:.1f}%")
     
         print("="*70)
-        print(f"Overall: {int(total_kept)}/{int(total_original)} channels kept "
-              f"({100*total_kept/total_original:.2f}%)")
-        print(f"Pruned: {int(total_original-total_kept)}/{int(total_original)} channels removed "
-              f"({100*(total_original-total_kept)/total_original:.2f}%)")
+        overall_pruned = (1 - total_kept/total_original) * 100
+        print(f"Overall: {int(total_kept):4d}/{int(total_original):4d} channels kept | "
+              f"Pruned: {overall_pruned:.2f}%")
         print("="*70 + "\n")
     
         return binary_masks
