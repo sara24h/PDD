@@ -314,11 +314,11 @@ class PDDTrainer:
         """
         binary_masks = {}
         for name, mask in self.masks.items():
-        # Apply ApproxSign to get the actual scores
-           score = self._approx_sign(mask).detach()
+            # Apply ApproxSign to get the actual scores
+            score = self._approx_sign(mask).detach()
         
-        # Keep channels with score > small threshold (to avoid floating point issues)
-        # Paper says "score of 0" means prune, so we keep score > 0
+            # Keep channels with score > small threshold (to avoid floating point issues)
+            # Paper says "score of 0" means prune, so we keep score > 0
             binary_masks[name] = (score > 0.01).float()  # Small threshold for numerical stability
     
         return binary_masks
