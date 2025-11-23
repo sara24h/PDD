@@ -68,9 +68,8 @@ def main():
     for name, mask in masks.items():
         mask_flat = mask.squeeze()
 
-        mask_binary = (mask_flat >= -1.0).float()
-        total = mask_binary.numel()
-        kept = mask_binary.sum().item()
+        total = mask_flat.numel()
+        kept = mask_flat.sum().item()
         
         total_channels += total
         kept_channels += kept
