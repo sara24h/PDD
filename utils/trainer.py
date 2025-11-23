@@ -12,13 +12,9 @@ class PDDTrainer:
         self.test_loader = test_loader
         self.device = device
         self.args = args
-        
-        # Initialize masks
+
         self.masks = self._initialize_masks()
-        
-        # ✅ FIX 1: Different learning rates for parameters
-        # Paper uses SGD with lr=0.01 for everything
-        # But masks might need different treatment
+
         mask_params = list(self.masks.values())
         
         self.optimizer = torch.optim.SGD(
@@ -43,13 +39,12 @@ class PDDTrainer:
 
     def _initialize_masks(self):
         """
-        ✅ CRITICAL: Initialization strategy determines pruning behavior!
+        CRITICAL: Initialization strategy determines pruning behavior!
         
         Paper strategy (inferred from results):
         - Random initialization allows natural evolution
         - Some masks will drift negative (pruned)
         - Others stay positive (kept)
-        - No explicit sparsity needed!
         """
         masks = {}
         
@@ -123,25 +118,12 @@ class PDDTrainer:
         
         return out
 
-    def _sparsity_loss(self):
-        """
-        ✅ FIX 3: Add L1 sparsity regularization on masks
-        This encourages masks to become negative (pruned)
-        """
-        sparsity = 0.0
-        for mask in self.masks.values():
-            # Penalize masks that are NOT pruned (raw_mask >= -1)
-            # We want to push them below -1
-            sparsity += torch.sum(torch.relu(mask + 1.0))  # Only penalize values > -1
-        
-        return sparsity
-
     def train(self):
         print("\n" + "="*70)
         print("Starting PDD Training - EXACT Paper Implementation")
         print("="*70)
         print(f"Temperature: {self.args.temperature}")
-        print(f"Alpha (KD weight): {self.args.alpha} ⚠️ CRITICAL!")
+        print(f"Alpha (KD weight): {self.args.alpha}")
         print(f"Learning Rate: {self.args.lr}")
         print(f"Mask Learning Rate: {self.args.lr * 5.0} (5x higher)")
         print(f"Epochs: {self.args.epochs}")
@@ -155,7 +137,6 @@ class PDDTrainer:
             train_loss = 0.0
             kd_loss_total = 0.0
             ce_loss_total = 0.0
-            sparsity_loss_total = 0.0
             correct = 0
             total = 0
             
@@ -178,8 +159,7 @@ class PDDTrainer:
                 soft_teacher = F.softmax(teacher_outputs / self.args.temperature, dim=1)
                 soft_student = F.log_softmax(student_outputs / self.args.temperature, dim=1)
                 kd_loss = self.kd_criterion(soft_student, soft_teacher) * (self.args.temperature ** 2)
-                
-                # Total loss - EXACT as paper (no sparsity term!)
+
                 total_loss = self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss
                 
                 total_loss.backward()
@@ -286,26 +266,18 @@ class PDDTrainer:
         return 100. * pruned_channels / total_channels
 
     def get_masks(self):
-        """
-        Generate binary masks based on raw mask values
-        Keep if raw_mask >= -1, Prune if raw_mask < -1
-        """
+       
         binary_masks = {}
         
         print(f"\n🔍 Generating binary masks based on raw mask values")
-        print(f"Threshold: raw_mask >= -1.0 (keep), raw_mask < -1.0 (prune)")
         print()
         
         for name, mask in self.masks.items():
             raw_mask = mask.detach().squeeze()
             score = self._approx_sign(mask).detach().squeeze()
-            
-            # Binary mask based on raw values
-            binary_mask = (raw_mask >= -1.0).float()
-            
+            binary_mask = (score > 0.0).float()
             binary_masks[name] = binary_mask
-            
-            # Statistics
+
             kept = binary_mask.sum().item()
             total = binary_mask.numel()
             score_min = score.min().item()
