@@ -66,8 +66,10 @@ def resnet56(num_classes=10):
     return ResNet(BasicBlock, [9, 9, 9], num_classes=num_classes)
 
 def resnet50(num_classes=10):
-    """ResNet-50 for CIFAR10 (custom architecture from kuangliu/pytorch-cifar)"""
     return ResNet(BasicBlock, [8, 8, 8], num_classes=num_classes)
 
 def resnet110(num_classes=10):
     return ResNet(BasicBlock, [18, 18, 18], num_classes=num_classes)
+
+def resnet18(num_classes=10):
+    return ResNet(BasicBlock, [2, 2, 2], num_classes=num_classes)
