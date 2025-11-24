@@ -188,7 +188,7 @@ class ModelPruner:
                 
                 # ✅ اصلاح شد: از downsample استفاده می‌کنیم
                 # Shortcut
-                if len(orig_block.downsample) > 0:
+                if orig_block.downsample is not None and len(orig_block.downsample) > 0:
                     for i, layer in enumerate(orig_block.downsample):
                         if isinstance(layer, nn.Conv2d):
                             if block_idx == 0:
