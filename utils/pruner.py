@@ -55,6 +55,10 @@ class ModelPruner:
         print("✓ Pruned model created")
         
         print("\nCopying weights...")
+        
+        device = next(self.model.parameters()).device
+        pruned_model = pruned_model.to(device)
+        
         self._copy_weights(pruned_model, keep_indices)
         print("✓ Weights copied")
         
