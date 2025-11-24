@@ -1,3 +1,5 @@
+# utils/trainer.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -77,7 +79,7 @@ class PDDTrainer:
         out = F.relu(out)
         
         # Process each stage
-        for layer_name in ['layer1', 'layer2', 'layer3']:
+        for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']: # layer4 برای ResNet استاندارد اضافه شد
             layer = getattr(self.student, layer_name)
             for i, block in enumerate(layer):
                 identity = out
@@ -100,10 +102,11 @@ class PDDTrainer:
                 out = block.bn2(out)
                 
                 # Shortcut connection
-                if len(block.shortcut) > 0:
-                    identity = block.shortcut(identity)
-                    # ✅ Apply mask to shortcut too!
-                    shortcut_mask_name = f'{layer_name}.{i}.shortcut.0'
+                # ✅ اصلاح شد: shortcut به downsample تغییر یافت
+                if len(block.downsample) > 0:
+                    identity = block.downsample(identity)
+                    # ✅ ماسک برای لایه downsample هم اعمال می‌شود
+                    shortcut_mask_name = f'{layer_name}.{i}.downsample.0'
                     if shortcut_mask_name in self.masks:
                         shortcut_mask = self._approx_sign(self.masks[shortcut_mask_name])
                         identity = identity * shortcut_mask
@@ -114,6 +117,7 @@ class PDDTrainer:
         # Global average pooling
         out = F.avg_pool2d(out, out.size()[3])
         out = out.view(out.size(0), -1)
+        # ✅ اصلاح شد: fc به linear تغییر یافت
         out = self.student.linear(out)
         
         return out
@@ -151,7 +155,10 @@ class PDDTrainer:
                 # Teacher outputs
                 with torch.no_grad():
                     teacher_outputs = self.teacher(inputs)
-                
+                    # ✅ اصلاح بحرانی: خروجی معلم (1 کلاسه) با دانش‌آموز (2 کلاسه) تطبیق داده می‌شود
+                    if teacher_outputs.shape[1] == 1 and student_outputs.shape[1] == 2:
+                        teacher_outputs = torch.cat([-teacher_outputs, teacher_outputs], dim=1)
+
                 # Classification loss
                 ce_loss = self.criterion(student_outputs, targets)
                 
