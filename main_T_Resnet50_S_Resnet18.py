@@ -112,7 +112,7 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     
     # <<< CHANGE: تعداد کلاس‌ها را 2 تعریف کنید
-    NUM_CLASSES = 2
+    NUM_CLASSES = 1
     
     print(f"Device: {device}")
     print(f"Task: Binary Face Classification (RVF10K)")
