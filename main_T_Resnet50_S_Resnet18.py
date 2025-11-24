@@ -2,46 +2,18 @@ import torch
 import torch.nn as nn
 import argparse
 import os
-import urllib.request
-from utils.data_loader import get_cifar10_dataloaders
-from models.resnet import resnet50, resnet110
+# <<< CHANGE: دیگر به دانلود معلم CIFAR نیاز نیست
+# import urllib.request 
+# <<< CHANGE: لودر داده سفارشی خود را وارد کنید (فرض بر این است که در این فایل است)
+from utils.data_loader_face import Dataset_selector 
+# <<< CHANGE: مدل ResNet18 و ResNet50 را وارد کنید
+from models.resnet import resnet18, resnet50
 from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
 
-
-def download_teacher_checkpoint(checkpoint_path):
-    """Download pretrained ResNet110 if not exists"""
-    if os.path.exists(checkpoint_path):
-        print(f"✓ Checkpoint found at {checkpoint_path}")
-        return True
-    
-    print(f"✗ Checkpoint not found at {checkpoint_path}")
-    print("Downloading pretrained ResNet110 from GitHub...")
-    
-    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-    
-    urls = [
-        'https://github.com/akamaster/pytorch_resnet_cifar10/raw/master/pretrained_models/resnet110-1d1ed7c2.th'
-    ]
-    
-    for url in urls:
-        try:
-            print(f"Trying: {url}")
-            urllib.request.urlretrieve(url, checkpoint_path)
-            
-            # Verify
-            torch.load(checkpoint_path, map_location='cpu')
-            print(f"✓ Successfully downloaded to {checkpoint_path}")
-            return True
-            
-        except Exception as e:
-            print(f"✗ Failed: {str(e)}")
-            if os.path.exists(checkpoint_path):
-                os.remove(checkpoint_path)
-    
-    return False
-
+# <<< CHANGE: تابع دانلود معلم را کاملاً حذف کنید
+# def download_teacher_checkpoint(...): ...
 
 def load_teacher_model(teacher, checkpoint_path, device):
     """Load teacher model with automatic key mapping"""
@@ -64,11 +36,8 @@ def load_teacher_model(teacher, checkpoint_path, device):
     new_state_dict = {}
     for key, value in state_dict.items():
         new_key = key
-        # حذف پیشوند module. اگر وجود دارد
         new_key = new_key.replace('module.', '')
-        # تبدیل downsample به shortcut
         new_key = new_key.replace('downsample.', 'shortcut.')
-        # تبدیل fc به linear
         new_key = new_key.replace('fc.', 'linear.')
         new_state_dict[new_key] = value
     
@@ -96,18 +65,21 @@ def load_teacher_model(teacher, checkpoint_path, device):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='PDD Implementation - ResNet110 Teacher, ResNet50 Student')
+    # <<< CHANGE: توضیحات را برای مسئله خودتان تغییر دهید
+    parser = argparse.ArgumentParser(description='PDD for Binary Face Classification (RVF10K)')
     
     # Data
-    parser.add_argument('--data_dir', type=str, default='./data')
-    parser.add_argument('--batch_size', type=int, default=256)
+    # <<< CHANGE: آرگومان‌های دیتاست RVF10K را اضافه کنید
+    parser.add_argument('--rvf10k_train_csv', type=str, default='/kaggle/input/rvf10k/train.csv')
+    parser.add_argument('--rvf10k_valid_csv', type=str, default='/kaggle/input/rvf10k/valid.csv')
+    parser.add_argument('--rvf10k_root_dir', type=str, default='/kaggle/input/rvf10k')
+    parser.add_argument('--batch_size', type=int, default=64) # <<< CHANGE: کاهش batch size برای دیتاست بزرگتر
     parser.add_argument('--num_workers', type=int, default=4)
     
     # Model
+    # <<< CHANGE: مسیر پیش‌فرض را به معلم خودتان تغییر دهید
     parser.add_argument('--teacher_checkpoint', type=str, 
-                        default='checkpoints/resnet110_cifar10.pth')
-    parser.add_argument('--download_teacher', action='store_true', default=True,
-                        help='Auto-download teacher checkpoint if not found')
+                        default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
     
     # Training (matching paper: 50 epochs for distillation)
     parser.add_argument('--epochs', type=int, default=50)
@@ -127,7 +99,7 @@ def parse_args():
     
     # Other
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--save_dir', type=str, default='./checkpoints')
+    parser.add_argument('--save_dir', type=str, default='/kaggle/working/pdd_checkpoints')
     parser.add_argument('--device', type=str, default='cuda')
     
     return parser.parse_args()
@@ -140,34 +112,50 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     
-    print(f"Device: {device}")
-    print(f"Teacher Model: ResNet110")
-    print(f"Student Model: ResNet50")
+    # <<< CHANGE: تعداد کلاس‌ها را 2 تعریف کنید
+    NUM_CLASSES = 2
     
-    # Load data
-    print("\nLoading CIFAR10...")
-    train_loader, test_loader = get_cifar10_dataloaders(
-        args.data_dir, args.batch_size, args.num_workers
+    print(f"Device: {device}")
+    print(f"Task: Binary Face Classification (RVF10K)")
+    print(f"Number of Classes: {NUM_CLASSES}")
+    print(f"Student Model: ResNet18")
+    print(f"Teacher Model: ResNet50")
+    
+    # <<< CHANGE: از لودر داده سفارشی خود برای RVF10K استفاده کنید
+    print("\nLoading RVF10K Dataset...")
+    dataset_selector = Dataset_selector(
+        dataset_mode='rvf10k',
+        rvf10k_train_csv=args.rvf10k_train_csv,
+        rvf10k_valid_csv=args.rvf10k_valid_csv,
+        rvf10k_root_dir=args.rvf10k_root_dir,
+        train_batch_size=args.batch_size,
+        eval_batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        ddp=False # فرض بر استفاده از یک GPU
     )
+    train_loader = dataset_selector.loader_train
+    test_loader = dataset_selector.loader_test # استفاده از test_loader برای ارزیابی
     
     # Create models
     print("\nCreating models...")
-    student = resnet50(num_classes=10).to(device)
-    teacher = resnet110(num_classes=10).to(device)
+    # <<< CHANGE: از ResNet18 به عنوان دانش‌آموز و با 2 کلاس استفاده کنید
+    student = resnet18(num_classes=NUM_CLASSES).to(device)
+    # <<< CHANGE: از ResNet50 به عنوان معلم و با 2 کلاس استفاده کنید
+    teacher = resnet50(num_classes=NUM_CLASSES).to(device)
     
-    print(f"Student (ResNet50) parameters: {sum(p.numel() for p in student.parameters()):,}")
-    print(f"Teacher (ResNet110) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
+    print(f"Student (ResNet18) parameters: {sum(p.numel() for p in student.parameters()):,}")
+    print(f"Teacher (ResNet50) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
     
-    # Download teacher checkpoint if needed
-    if args.download_teacher:
-        if not download_teacher_checkpoint(args.teacher_checkpoint):
-            print("\n⚠ ERROR: Could not download teacher checkpoint!")
-            print("Please download manually from:")
-            print("https://github.com/chenyaofo/pytorch-cifar-models")
-            return
+    # <<< CHANGE: بخش دانلود معلم را کاملاً حذف کنید
     
     # Load teacher with automatic key mapping
     print("\nLoading teacher model...")
+    # بررسی کنید که فایل معلم وجود دارد
+    if not os.path.exists(args.teacher_checkpoint):
+        print(f"✗ ERROR: Teacher checkpoint not found at {args.teacher_checkpoint}")
+        print("Please check the path to your teacher model.")
+        return
+        
     teacher = load_teacher_model(teacher, args.teacher_checkpoint, device)
     teacher.eval()
     
@@ -185,12 +173,10 @@ def main():
             correct += predicted.eq(targets).sum().item()
     
     teacher_acc = 100. * correct / total
-    print(f"Teacher (ResNet110) Accuracy: {teacher_acc:.2f}%")
+    print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
     
-    if teacher_acc < 50.0:
-        print("\n⚠ WARNING: Teacher accuracy is very low!")
-        print("This might indicate an issue with loading the checkpoint.")
-        print("Please verify the checkpoint file.")
+    if teacher_acc < 70.0: # برای باینری، انتظار دقت بالاتری داریم
+        print("\n⚠ WARNING: Teacher accuracy might be too low for effective distillation!")
     
     # Phase 1: Pruning During Distillation
     print("\n" + "="*70)
@@ -200,8 +186,8 @@ def main():
     trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args)
     trainer.train()
     
-    # Save with masks
-    save_path = os.path.join(args.save_dir, 'student_resnet50_with_masks.pth')
+    # <<< CHANGE: نام فایل ذخیره‌سازی را تغییر دهید
+    save_path = os.path.join(args.save_dir, 'student_resnet18_binary_with_masks.pth')
     save_checkpoint({
         'state_dict': student.state_dict(),
         'masks': trainer.get_masks(),
@@ -296,6 +282,7 @@ def main():
         
         if test_acc > best_acc:
             best_acc = test_acc
+            # <<< CHANGE: نام فایل نهایی را تغییر دهید
             save_checkpoint({
                 'epoch': epoch,
                 'state_dict': pruned_student.state_dict(),
@@ -303,7 +290,7 @@ def main():
                 'params_reduction': params_red,
                 'flops_reduction': flops_red,
                 'args': args
-            }, os.path.join(args.save_dir, 'pruned_resnet50_best.pth'))
+            }, os.path.join(args.save_dir, 'pruned_resnet18_binary_best.pth'))
         
         scheduler.step()
     
@@ -311,8 +298,8 @@ def main():
     print("\n" + "="*70)
     print("FINAL RESULTS")
     print("="*70)
-    print(f"Teacher (ResNet110) Accuracy: {teacher_acc:.2f}%")
-    print(f"Best Test Accuracy (Pruned ResNet50): {best_acc:.2f}%")
+    print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
+    print(f"Best Test Accuracy (Pruned ResNet18): {best_acc:.2f}%")
     print(f"Parameters Reduction: {params_red:.2f}%")
     print(f"FLOPs Reduction: {flops_red:.2f}%")
     print("="*70 + "\n")
