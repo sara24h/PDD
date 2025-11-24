@@ -102,10 +102,8 @@ class PDDTrainer:
                 out = block.bn2(out)
                 
                 # Shortcut connection
-                # ✅ اصلاح شد: بررسی می‌کنیم که آیا downsample وجود دارد یا None است
                 if block.downsample is not None:
                     identity = block.downsample(identity)
-                    # ✅ ماسک برای لایه اول downsample اعمال می‌شود
                     shortcut_mask_name = f'{layer_name}.{i}.downsample.0'
                     if shortcut_mask_name in self.masks:
                         shortcut_mask = self._approx_sign(self.masks[shortcut_mask_name])
@@ -117,7 +115,6 @@ class PDDTrainer:
         # Global average pooling
         out = F.avg_pool2d(out, out.size()[3])
         out = out.view(out.size(0), -1)
-        # ✅ اصلاح شد: fc به linear تغییر یافت
         out = self.student.fc(out)
         
         return out
