@@ -158,7 +158,7 @@ def main():
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = teacher(inputs)
             # ✅ اصلاح شد: برای مدل باینری با یک خروجی، پیش‌بینی به این شکل است
-            predicted = (outputs > 0).long().squeeze()
+            predicted = (outputs.squeeze() > 0).long()
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
     
