@@ -78,8 +78,7 @@ def parse_args():
     
     # Model
     # <<< CHANGE: مسیر پیش‌فرض را به معلم خودتان تغییر دهید
-    parser.add_argument('--teacher_checkpoint', type=str, 
-                        default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
+    parser.add_argument('--teacher_checkpoint', type=str, default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
     
     # Training (matching paper: 50 epochs for distillation)
     parser.add_argument('--epochs', type=int, default=50)
