@@ -6,12 +6,7 @@ from thop import profile
 
 class ModelPruner:
     def __init__(self, model, masks):
-        """
-        Args:
-            model: مدل اصلی (student model)
-            masks: دیکشنری ماسک‌های باینری که از trainer.get_masks() آمده
-                   (1 = keep channel, 0 = prune channel)
-        """
+        
         self.model = model
         self.masks = masks
         self._original_params = None
@@ -20,16 +15,13 @@ class ModelPruner:
         self._pruned_flops = None
 
     def _calculate_flops(self, model):
-  
+
         input_tensor = torch.randn(1, 3, 256, 256).to(next(model.parameters()).device)
         flops, _ = profile(model, inputs=(input_tensor,), verbose=False)
         return flops
 
     def prune(self):
-        """
-        ✅ حذف کانال‌های redundant بر اساس ماسک‌های باینری
-        ماسک‌ها از trainer.get_masks() می‌آیند که بر اساس raw_mask >= -1.0 ساخته شده‌اند
-        """
+      
         print("\nAnalyzing masks...")
         
         keep_indices = {}
