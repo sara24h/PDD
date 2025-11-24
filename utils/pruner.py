@@ -20,8 +20,8 @@ class ModelPruner:
         self._pruned_flops = None
 
     def _calculate_flops(self, model):
-        """محاسبه دقیق FLOPs برای ResNet روی CIFAR-10"""
-        input_tensor = torch.randn(1, 3, 32, 32).to(next(model.parameters()).device)
+  
+        input_tensor = torch.randn(1, 3, 256, 256).to(next(model.parameters()).device)
         flops, _ = profile(model, inputs=(input_tensor,), verbose=False)
         return flops
 
