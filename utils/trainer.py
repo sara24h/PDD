@@ -79,7 +79,7 @@ class PDDTrainer:
         out = F.relu(out)
         
         # Process each stage
-        for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']: # layer4 برای ResNet استاندارد اضافه شد
+        for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
             layer = getattr(self.student, layer_name)
             for i, block in enumerate(layer):
                 identity = out
@@ -102,10 +102,10 @@ class PDDTrainer:
                 out = block.bn2(out)
                 
                 # Shortcut connection
-                # ✅ اصلاح شد: shortcut به downsample تغییر یافت
-                if len(block.downsample) > 0:
+                # ✅ اصلاح شد: بررسی می‌کنیم که آیا downsample وجود دارد یا None است
+                if block.downsample is not None:
                     identity = block.downsample(identity)
-                    # ✅ ماسک برای لایه downsample هم اعمال می‌شود
+                    # ✅ ماسک برای لایه اول downsample اعمال می‌شود
                     shortcut_mask_name = f'{layer_name}.{i}.downsample.0'
                     if shortcut_mask_name in self.masks:
                         shortcut_mask = self._approx_sign(self.masks[shortcut_mask_name])
@@ -157,7 +157,9 @@ class PDDTrainer:
                     teacher_outputs = self.teacher(inputs)
                     # ✅ اصلاح بحرانی: خروجی معلم (1 کلاسه) با دانش‌آموز (2 کلاسه) تطبیق داده می‌شود
                     if teacher_outputs.shape[1] == 1 and student_outputs.shape[1] == 2:
-                        teacher_outputs = torch.cat([-teacher_outputs, teacher_outputs], dim=1)
+                        # تبدیل خروجی [batch, 1] به [batch, 2] برای تطبیق با دانش‌آموز
+                        # این کار به دانش‌آموز اجازه می‌دهد از توزیع احتمالات معلم یاد بگیرد
+                        teacher_outputs = torch.cat([teacher_outputs, -teacher_outputs], dim=1)
 
                 # Classification loss
                 ce_loss = self.criterion(student_outputs, targets)
