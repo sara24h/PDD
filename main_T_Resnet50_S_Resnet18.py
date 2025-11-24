@@ -32,7 +32,7 @@ def load_teacher_model(teacher, checkpoint_path, device):
     for key, value in state_dict.items():
         new_key = key
         new_key = new_key.replace('module.', '')
-        new_key = new_key.replace('downsample.', 'shortcut.')
+        new_key = new_key.replace('shortcut.', 'downsample.')
         new_key = new_key.replace('fc.', 'linear.')
         new_state_dict[new_key] = value
     
