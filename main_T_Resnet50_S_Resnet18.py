@@ -1,19 +1,14 @@
+# main_T_Resnet50_S_Resnet18.py
+
 import torch
 import torch.nn as nn
 import argparse
 import os
-# <<< CHANGE: دیگر به دانلود معلم CIFAR نیاز نیست
-# import urllib.request 
-# <<< CHANGE: لودر داده سفارشی خود را وارد کنید (فرض بر این است که در این فایل است)
 from utils.data_loader_face import Dataset_selector 
-# <<< CHANGE: مدل ResNet18 و ResNet50 را وارد کنید
 from models.resnet import resnet18, resnet50
 from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
-
-# <<< CHANGE: تابع دانلود معلم را کاملاً حذف کنید
-# def download_teacher_checkpoint(...): ...
 
 def load_teacher_model(teacher, checkpoint_path, device):
     """Load teacher model with automatic key mapping"""
@@ -65,20 +60,18 @@ def load_teacher_model(teacher, checkpoint_path, device):
 
 
 def parse_args():
-    # <<< CHANGE: توضیحات را برای مسئله خودتان تغییر دهید
     parser = argparse.ArgumentParser(description='PDD for Binary Face Classification (RVF10K)')
     
     # Data
-    # <<< CHANGE: آرگومان‌های دیتاست RVF10K را اضافه کنید
     parser.add_argument('--rvf10k_train_csv', type=str, default='/kaggle/input/rvf10k/train.csv')
     parser.add_argument('--rvf10k_valid_csv', type=str, default='/kaggle/input/rvf10k/valid.csv')
     parser.add_argument('--rvf10k_root_dir', type=str, default='/kaggle/input/rvf10k')
-    parser.add_argument('--batch_size', type=int, default=64) # <<< CHANGE: کاهش batch size برای دیتاست بزرگتر
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=4)
     
     # Model
-    # <<< CHANGE: مسیر پیش‌فرض را به معلم خودتان تغییر دهید
-    parser.add_argument('--teacher_checkpoint', type=str, default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
+    parser.add_argument('--teacher_checkpoint', type=str, 
+                        default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
     
     # Training (matching paper: 50 epochs for distillation)
     parser.add_argument('--epochs', type=int, default=50)
@@ -111,16 +104,16 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     
-    # <<< CHANGE: تعداد کلاس‌ها را 2 تعریف کنید
-    NUM_CLASSES = 1
+    # ✅ اصلاح شد: تعداد کلاس‌ها برای هر مدل جداگانه تعریف می‌شود
+    NUM_CLASSES_TEACHER = 1  # برای مدل معلم باینری شما (یک خروجی)
+    NUM_CLASSES_STUDENT = 2  # برای مدل دانش‌آموز با CrossEntropyLoss (دو خروجی)
     
     print(f"Device: {device}")
     print(f"Task: Binary Face Classification (RVF10K)")
-    print(f"Number of Classes: {NUM_CLASSES}")
-    print(f"Student Model: ResNet18")
-    print(f"Teacher Model: ResNet50")
+    print(f"Student Model: ResNet18 (with {NUM_CLASSES_STUDENT} classes)")
+    print(f"Teacher Model: ResNet50 (with {NUM_CLASSES_TEACHER} class)")
     
-    # <<< CHANGE: از لودر داده سفارشی خود برای RVF10K استفاده کنید
+    # Load data
     print("\nLoading RVF10K Dataset...")
     dataset_selector = Dataset_selector(
         dataset_mode='rvf10k',
@@ -137,19 +130,16 @@ def main():
     
     # Create models
     print("\nCreating models...")
-    # <<< CHANGE: از ResNet18 به عنوان دانش‌آموز و با 2 کلاس استفاده کنید
-    student = resnet18(num_classes=NUM_CLASSES).to(device)
-    # <<< CHANGE: از ResNet50 به عنوان معلم و با 2 کلاس استفاده کنید
-    teacher = resnet50(num_classes=NUM_CLASSES).to(device)
+    # ✅ اصلاح شد: مدل دانش‌آموز برای مسئله دو کلاسه شما
+    student = resnet18(num_classes=NUM_CLASSES_STUDENT).to(device)
+    # ✅ اصلاح شد: مدل معلم با چک‌پوینت مطابقت دارد (یک خروجی برای باینری)
+    teacher = resnet50(num_classes=NUM_CLASSES_TEACHER).to(device)
     
     print(f"Student (ResNet18) parameters: {sum(p.numel() for p in student.parameters()):,}")
     print(f"Teacher (ResNet50) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
     
-    # <<< CHANGE: بخش دانلود معلم را کاملاً حذف کنید
-    
     # Load teacher with automatic key mapping
     print("\nLoading teacher model...")
-    # بررسی کنید که فایل معلم وجود دارد
     if not os.path.exists(args.teacher_checkpoint):
         print(f"✗ ERROR: Teacher checkpoint not found at {args.teacher_checkpoint}")
         print("Please check the path to your teacher model.")
@@ -167,7 +157,8 @@ def main():
         for inputs, targets in test_loader:
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = teacher(inputs)
-            _, predicted = outputs.max(1)
+            # ✅ اصلاح شد: برای مدل باینری با یک خروجی، پیش‌بینی به این شکل است
+            predicted = (outputs > 0).long().squeeze()
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
     
@@ -185,7 +176,6 @@ def main():
     trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args)
     trainer.train()
     
-    # <<< CHANGE: نام فایل ذخیره‌سازی را تغییر دهید
     save_path = os.path.join(args.save_dir, 'student_resnet18_binary_with_masks.pth')
     save_checkpoint({
         'state_dict': student.state_dict(),
@@ -281,7 +271,6 @@ def main():
         
         if test_acc > best_acc:
             best_acc = test_acc
-            # <<< CHANGE: نام فایل نهایی را تغییر دهید
             save_checkpoint({
                 'epoch': epoch,
                 'state_dict': pruned_student.state_dict(),
