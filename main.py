@@ -4,27 +4,30 @@ import argparse
 import os
 import urllib.request
 from utils.data_loader import get_cifar10_dataloaders
-from models.resnet import resnet20, resnet56
+# مسیر import را به models.resnet تغییر دهید
+from models.resnet import resnet50, resnet110
 from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
 
 
 def download_teacher_checkpoint(checkpoint_path):
-    """Download pretrained ResNet56 if not exists"""
+    """Download pretrained ResNet110 if not exists"""
     if os.path.exists(checkpoint_path):
         print(f"✓ Checkpoint found at {checkpoint_path}")
         return True
     
     print(f"✗ Checkpoint not found at {checkpoint_path}")
-    print("Downloading pretrained ResNet56 from GitHub...")
+    print("Downloading pretrained ResNet110 from GitHub...")
     
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     
+    # --- لینک‌های دانلود را با لینک‌های صحیح جایگزین کنید ---
     urls = [
-        'https://github.com/chenyaofo/pytorch-cifar-models/releases/download/resnet/cifar10_resnet56-187c023a.pt',
-        'https://github.com/huyvnphan/PyTorch_CIFAR10/releases/download/v3.0.0/resnet56-10b9e6fd.pt'
+        # لینک صحیح برای ResNet110 از مخزن chenyaofo/pytorch-cifar-models
+        'https://github.com/chenyaofo/pytorch-cifar-models/releases/download/data/resnet110-8d457cdd.pth'
     ]
+    # --- پایان بخش جایگزینی ---
     
     for url in urls:
         try:
@@ -97,7 +100,7 @@ def load_teacher_model(teacher, checkpoint_path, device):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='PDD Implementation')
+    parser = argparse.ArgumentParser(description='PDD Implementation - ResNet110 Teacher, ResNet50 Student')
     
     # Data
     parser.add_argument('--data_dir', type=str, default='./data')
@@ -106,7 +109,7 @@ def parse_args():
     
     # Model
     parser.add_argument('--teacher_checkpoint', type=str, 
-                        default='checkpoints/resnet56_cifar10.pth')
+                        default='checkpoints/resnet110_cifar10.pth')
     parser.add_argument('--download_teacher', action='store_true', default=True,
                         help='Auto-download teacher checkpoint if not found')
     
@@ -142,6 +145,8 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     
     print(f"Device: {device}")
+    print(f"Teacher Model: ResNet110")
+    print(f"Student Model: ResNet50")
     
     # Load data
     print("\nLoading CIFAR10...")
@@ -151,8 +156,12 @@ def main():
     
     # Create models
     print("\nCreating models...")
-    student = resnet20(num_classes=10).to(device)
-    teacher = resnet56(num_classes=10).to(device)
+    # این مدل‌ها از فایل models/resnet.py وارد می‌شوند
+    student = resnet50(num_classes=10).to(device)
+    teacher = resnet110(num_classes=10).to(device)
+    
+    print(f"Student (ResNet50) parameters: {sum(p.numel() for p in student.parameters()):,}")
+    print(f"Teacher (ResNet110) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
     
     # Download teacher checkpoint if needed
     if args.download_teacher:
@@ -181,7 +190,7 @@ def main():
             correct += predicted.eq(targets).sum().item()
     
     teacher_acc = 100. * correct / total
-    print(f"Teacher Accuracy: {teacher_acc:.2f}%")
+    print(f"Teacher (ResNet110) Accuracy: {teacher_acc:.2f}%")
     
     if teacher_acc < 50.0:
         print("\n⚠ WARNING: Teacher accuracy is very low!")
@@ -197,7 +206,7 @@ def main():
     trainer.train()
     
     # Save with masks
-    save_path = os.path.join(args.save_dir, 'student_with_masks.pth')
+    save_path = os.path.join(args.save_dir, 'student_resnet50_with_masks.pth')
     save_checkpoint({
         'state_dict': student.state_dict(),
         'masks': trainer.get_masks(),
@@ -299,7 +308,7 @@ def main():
                 'params_reduction': params_red,
                 'flops_reduction': flops_red,
                 'args': args
-            }, os.path.join(args.save_dir, 'pruned_best.pth'))
+            }, os.path.join(args.save_dir, 'pruned_resnet50_best.pth'))
         
         scheduler.step()
     
@@ -307,8 +316,8 @@ def main():
     print("\n" + "="*70)
     print("FINAL RESULTS")
     print("="*70)
-    print(f"Teacher Accuracy: {teacher_acc:.2f}%")
-    print(f"Best Test Accuracy: {best_acc:.2f}%")
+    print(f"Teacher (ResNet110) Accuracy: {teacher_acc:.2f}%")
+    print(f"Best Test Accuracy (Pruned ResNet50): {best_acc:.2f}%")
     print(f"Parameters Reduction: {params_red:.2f}%")
     print(f"FLOPs Reduction: {flops_red:.2f}%")
     print("="*70 + "\n")
