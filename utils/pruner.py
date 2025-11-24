@@ -6,7 +6,12 @@ from thop import profile
 
 class ModelPruner:
     def __init__(self, model, masks):
-      
+        """
+        Args:
+            model: مدل اصلی (student model)
+            masks: دیکشنری ماسک‌های باینری که از trainer.get_masks() آمده
+                   (1 = keep channel, 0 = prune channel)
+        """
         self.model = model
         self.masks = masks
         self._original_params = None
@@ -21,7 +26,10 @@ class ModelPruner:
         return flops
 
     def prune(self):
-       
+        """
+        ✅ حذف کانال‌های redundant بر اساس ماسک‌های باینری
+        ماسک‌ها از trainer.get_masks() می‌آیند که بر اساس raw_mask >= -1.0 ساخته شده‌اند
+        """
         print("\nAnalyzing masks...")
         
         keep_indices = {}
@@ -107,23 +115,23 @@ class ModelPruner:
                 
                 # Update shortcut if needed
                 if stride != 1 or in_channels != conv2_out:
-                    block.shortcut = nn.Sequential(
+                    block.downsample = nn.Sequential( # ✅ اصلاح شد: به downsample تغییر یافت
                         nn.Conv2d(in_channels, conv2_out, 
                                  kernel_size=1, stride=stride, bias=False),
                         nn.BatchNorm2d(conv2_out)
                     )
                 else:
-                    block.shortcut = nn.Sequential()
+                    block.downsample = nn.Sequential() # ✅ اصلاح شد: به downsample تغییر یافت
                 
                 prev_channels = conv2_out
         
-      
+        # ✅ اصلاح شد: از fc استفاده می‌کنیم
         pruned_model.fc = nn.Linear(prev_channels, num_classes)
         
         return pruned_model
 
     def _copy_weights(self, pruned_model, keep_indices):
-     
+        """کپی کردن وزن‌ها از مدل اصلی به مدل هرس شده"""
         
         # Conv1
         if 'conv1' in keep_indices:
@@ -178,9 +186,10 @@ class ModelPruner:
                     pruned_block.bn2.running_mean.data = orig_block.bn2.running_mean.data[out_idx]
                     pruned_block.bn2.running_var.data = orig_block.bn2.running_var.data[out_idx]
                 
+                # ✅ اصلاح شد: از downsample استفاده می‌کنیم
                 # Shortcut
-                if len(orig_block.shortcut) > 0:
-                    for i, layer in enumerate(orig_block.shortcut):
+                if len(orig_block.downsample) > 0:
+                    for i, layer in enumerate(orig_block.downsample):
                         if isinstance(layer, nn.Conv2d):
                             if block_idx == 0:
                                 if stage_name == 'layer1':
@@ -194,15 +203,16 @@ class ModelPruner:
                                 in_idx = keep_indices.get(prev_conv_name, torch.arange(layer.in_channels))
                             
                             out_idx = keep_indices.get(conv2_name, torch.arange(layer.out_channels))
-                            pruned_block.shortcut[i].weight.data = layer.weight.data[out_idx, :, :, :][:, in_idx, :, :]
+                            pruned_block.downsample[i].weight.data = layer.weight.data[out_idx, :, :, :][:, in_idx, :, :]
                         
                         elif isinstance(layer, nn.BatchNorm2d):
                             out_idx = keep_indices.get(conv2_name, torch.arange(layer.num_features))
-                            pruned_block.shortcut[i].weight.data = layer.weight.data[out_idx]
-                            pruned_block.shortcut[i].bias.data = layer.bias.data[out_idx]
-                            pruned_block.shortcut[i].running_mean.data = layer.running_mean.data[out_idx]
-                            pruned_block.shortcut[i].running_var.data = layer.running_var.data[out_idx]
-
+                            pruned_block.downsample[i].weight.data = layer.weight.data[out_idx]
+                            pruned_block.downsample[i].bias.data = layer.bias.data[out_idx]
+                            pruned_block.downsample[i].running_mean.data = layer.running_mean.data[out_idx]
+                            pruned_block.downsample[i].running_var.data = layer.running_var.data[out_idx]
+        
+        # ✅ اصلاح شد: از fc استفاده می‌کنیم
         last_stage_last_block = f'layer4.1.conv2'
         if last_stage_last_block in keep_indices:
             in_idx = keep_indices[last_stage_last_block]
@@ -210,7 +220,7 @@ class ModelPruner:
             pruned_model.fc.bias.data = self.model.fc.bias.data
 
     def _calculate_compression_stats(self, pruned_model):
-   
+        """محاسبه آمار فشرده‌سازی"""
         self._original_params = sum(p.numel() for p in self.model.parameters())
         self._pruned_params = sum(p.numel() for p in pruned_model.parameters())
         
