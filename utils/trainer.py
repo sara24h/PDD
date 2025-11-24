@@ -154,9 +154,9 @@ class PDDTrainer:
                     teacher_outputs = self.teacher(inputs)
                     # ✅ اصلاح بحرانی: خروجی معلم (1 کلاسه) با دانش‌آموز (2 کلاسه) تطبیق داده می‌شود
                     if teacher_outputs.shape[1] == 1 and student_outputs.shape[1] == 2:
-                        # تبدیل خروجی [batch, 1] به [batch, 2] برای تطبیق با دانش‌آموز
-                        # این کار به دانش‌آموز اجازه می‌دهد از توزیع احتمالات معلم یاد بگیرد
-                        teacher_outputs = torch.cat([teacher_outputs, -teacher_outputs], dim=1)
+                        
+                        teacher_outputs = teacher_outputs.squeeze(1)
+                        teacher_outputs = torch.stack([teacher_outputs, -teacher_outputs], dim=1)
 
                 # Classification loss
                 ce_loss = self.criterion(student_outputs, targets)
