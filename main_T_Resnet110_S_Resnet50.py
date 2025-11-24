@@ -22,8 +22,7 @@ def download_teacher_checkpoint(checkpoint_path):
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     
     urls = [
-        'https://github.com/chenyaofo/pytorch-cifar-models/releases/download/resnet/cifar10_resnet110-1d1ed7c2.pt',
-        'https://github.com/huyvnphan/PyTorch_CIFAR10/releases/download/v3.0.0/resnet110-84f3c0d6.pt'
+        'https://github.com/akamaster/pytorch_resnet_cifar10/raw/master/pretrained_models/resnet110-1d1ed7c2.th'
     ]
     
     for url in urls:
