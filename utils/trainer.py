@@ -118,7 +118,7 @@ class PDDTrainer:
         out = F.avg_pool2d(out, out.size()[3])
         out = out.view(out.size(0), -1)
         # ✅ اصلاح شد: fc به linear تغییر یافت
-        out = self.student.linear(out)
+        out = self.student.fc(out)
         
         return out
 
