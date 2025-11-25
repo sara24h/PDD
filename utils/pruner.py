@@ -126,8 +126,6 @@ class ModelPruner:
                                        kernel_size=3, stride=1, padding=1, bias=False)
                 block.bn2 = nn.BatchNorm2d(conv2_out_channels)
                 
-                # --- به‌روزرسانی لایه اتصال کوتاه (Shortcut/downsample) ---
-                # اگر ابعاد ورودی و خروجی مطابقت نداشته باشند، به downsample نیاز است
                 if stride != 1 or prev_out_channels != conv2_out_channels:
                     block.downsample = nn.Sequential(
                         nn.Conv2d(prev_out_channels, conv2_out_channels, 
@@ -137,18 +135,15 @@ class ModelPruner:
                 else:
                     block.downsample = nn.Sequential()
                 
-                # به‌روزرسانی تعداد کانال‌های خروجی برای استفاده در بلوک بعدی
                 prev_out_channels = conv2_out_channels
         
-        # --- به‌روزرسانی لایه نهایی ---
-        pruned_model.fc = nn.Linear(prev_out_channels, num_classes)
+
+        pruned_model.fc = nn.Linear(prev_out_channels, 1)  
         
         return pruned_model
 
     def _copy_weights(self, pruned_model, keep_indices):
-        """کپی کردن وزن‌های مربوط به کانال‌های باقی‌مانده از مدل اصلی به مدل هرس شده."""
-        
-        # --- کپی کردن وزن‌های conv1 و bn1 ---
+      
         if 'conv1' in keep_indices:
             keep_idx = keep_indices['conv1']
             pruned_model.conv1.weight.data = self.model.conv1.weight.data[keep_idx, :, :, :]
@@ -215,12 +210,12 @@ class ModelPruner:
                     pruned_block.downsample[1].running_mean.data = orig_block.downsample[1].running_mean.data[out_idx_downsample]
                     pruned_block.downsample[1].running_var.data = orig_block.downsample[1].running_var.data[out_idx_downsample]
 
-        # --- کپی کردن وزن‌های لایه کاملاً متصل (fc) ---
+    
         last_conv2_name = 'layer4.1.conv2'
         if last_conv2_name in keep_indices:
             in_idx_fc = keep_indices[last_conv2_name]
-            pruned_model.fc.weight.data = self.model.fc.weight.data[:, in_idx_fc]
-            pruned_model.fc.bias.data = self.model.fc.bias.data
+            pruned_model.fc.weight.data = self.model.fc.weight.data[:, in_idx_fc]  # [1, in_features]
+            pruned_model.fc.bias.data = self.model.fc.bias.data  # [1]
 
     def _calculate_compression_stats(self, pruned_model):
         """محاسبه آمار فشرده‌سازی (تعداد پارامترها و FLOPS)."""
