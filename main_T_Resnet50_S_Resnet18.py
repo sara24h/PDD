@@ -1,5 +1,3 @@
-# main_T_Resnet50_S_Resnet18.py
-
 import torch
 import torch.nn as nn
 import argparse
@@ -11,10 +9,8 @@ from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
 
 def load_teacher_model(teacher, checkpoint_path, device):
-    """Load teacher model with automatic key mapping"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Handle different checkpoint formats
     if isinstance(checkpoint, dict):
         if 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
@@ -27,16 +23,11 @@ def load_teacher_model(teacher, checkpoint_path, device):
     else:
         state_dict = checkpoint
     
-    # تبدیل کلیدها به فرمت سازگار
     new_state_dict = {}
     for key, value in state_dict.items():
-        new_key = key
-        new_key = new_key.replace('module.', '')
-        new_key = new_key.replace('shortcut.', 'downsample.')
-        #new_key = new_key.replace('fc.', 'linear.')
+        new_key = key.replace('module.', '').replace('shortcut.', 'downsample.')
         new_state_dict[new_key] = value
     
-    # بررسی سازگاری
     model_keys = set(teacher.state_dict().keys())
     checkpoint_keys = set(new_state_dict.keys())
     
@@ -58,7 +49,6 @@ def load_teacher_model(teacher, checkpoint_path, device):
     
     return teacher
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='PDD for Binary Face Classification (RVF10K)')
     
@@ -73,7 +63,7 @@ def parse_args():
     parser.add_argument('--teacher_checkpoint', type=str, 
                         default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
     
-    # Training (matching paper: 50 epochs for distillation)
+    # Training
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--momentum', type=float, default=0.9)
@@ -82,10 +72,9 @@ def parse_args():
     parser.add_argument('--lr_decay_rate', type=float, default=0.1)
     
     # Distillation
-    parser.add_argument('--temperature', type=float, default=4.0)
-    parser.add_argument('--alpha', type=float, default=0.5)
+    parser.add_argument('--alpha', type=float, default=0.9)  # KD weight (CE weight = 1-alpha)
     
-    # Fine-tuning (100 epochs as per paper)
+    # Fine-tuning
     parser.add_argument('--finetune_epochs', type=int, default=100)
     parser.add_argument('--finetune_lr', type=float, default=0.01)
     
@@ -96,7 +85,6 @@ def parse_args():
     
     return parser.parse_args()
 
-
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -104,14 +92,13 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     
-    # ✅ اصلاح شد: تعداد کلاس‌ها برای هر مدل جداگانه تعریف می‌شود
-    NUM_CLASSES_TEACHER = 1  # برای مدل معلم باینری شما (یک خروجی)
-    NUM_CLASSES_STUDENT = 2  # برای مدل دانش‌آموز با CrossEntropyLoss (دو خروجی)
+    # ✅ حالا هر دو مدل 1 کلاس دارند
+    NUM_CLASSES = 1
     
     print(f"Device: {device}")
     print(f"Task: Binary Face Classification (RVF10K)")
-    print(f"Student Model: ResNet18 (with {NUM_CLASSES_STUDENT} classes)")
-    print(f"Teacher Model: ResNet50 (with {NUM_CLASSES_TEACHER} class)")
+    print(f"Student Model: ResNet18 (1 output)")
+    print(f"Teacher Model: ResNet50 (1 output)")
     
     # Load data
     print("\nLoading RVF10K Dataset...")
@@ -123,26 +110,23 @@ def main():
         train_batch_size=args.batch_size,
         eval_batch_size=args.batch_size,
         num_workers=args.num_workers,
-        ddp=False # فرض بر استفاده از یک GPU
+        ddp=False
     )
     train_loader = dataset_selector.loader_train
-    test_loader = dataset_selector.loader_test # استفاده از test_loader برای ارزیابی
+    test_loader = dataset_selector.loader_test
     
-    # Create models
+    # Create models (1 output)
     print("\nCreating models...")
-    # ✅ اصلاح شد: مدل دانش‌آموز برای مسئله دو کلاسه شما
-    student = resnet18(num_classes=NUM_CLASSES_STUDENT).to(device)
-    # ✅ اصلاح شد: مدل معلم با چک‌پوینت مطابقت دارد (یک خروجی برای باینری)
-    teacher = resnet50(num_classes=NUM_CLASSES_TEACHER).to(device)
+    student = resnet18(num_classes=NUM_CLASSES).to(device)
+    teacher = resnet50(num_classes=NUM_CLASSES).to(device)
     
     print(f"Student (ResNet18) parameters: {sum(p.numel() for p in student.parameters()):,}")
     print(f"Teacher (ResNet50) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
     
-    # Load teacher with automatic key mapping
+    # Load teacher
     print("\nLoading teacher model...")
     if not os.path.exists(args.teacher_checkpoint):
         print(f"✗ ERROR: Teacher checkpoint not found at {args.teacher_checkpoint}")
-        print("Please check the path to your teacher model.")
         return
         
     teacher = load_teacher_model(teacher, args.teacher_checkpoint, device)
@@ -150,25 +134,20 @@ def main():
     
     # Evaluate teacher
     print("\nEvaluating teacher model...")
-    teacher.eval()
     correct = 0
     total = 0
     with torch.no_grad():
         for inputs, targets in test_loader:
             inputs, targets = inputs.to(device), targets.to(device)
-            outputs = teacher(inputs)
-            # ✅ اصلاح شد: برای مدل باینری با یک خروجی، پیش‌بینی به این شکل است
-            predicted = (outputs.squeeze() > 0).long()
+            outputs = teacher(inputs).squeeze(1)  # [B]
+            preds = (outputs > 0).long()
+            correct += preds.eq(targets).sum().item()
             total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
     
     teacher_acc = 100. * correct / total
     print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
     
-    if teacher_acc < 70.0: # برای باینری، انتظار دقت بالاتری داریم
-        print("\n⚠ WARNING: Teacher accuracy might be too low for effective distillation!")
-    
-    # Phase 1: Pruning During Distillation
+    # Phase 1: PDD
     print("\n" + "="*70)
     print("PHASE 1: Pruning During Distillation (50 epochs)")
     print("="*70)
@@ -184,7 +163,7 @@ def main():
     }, save_path)
     print(f"✓ Saved to {save_path}")
     
-    # Phase 2: Prune Model
+    # Phase 2: Prune
     print("\n" + "="*70)
     print("PHASE 2: Pruning Model")
     print("="*70)
@@ -220,54 +199,46 @@ def main():
         optimizer, milestones=[60, 80], gamma=0.1
     )
     
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.BCEWithLogitsLoss()  # ✅ BCE
     best_acc = 0.0
     
     for epoch in range(args.finetune_epochs):
-        # Train
         pruned_student.train()
-        train_loss = 0.0
         correct = 0
         total = 0
         
         for inputs, targets in train_loader:
             inputs, targets = inputs.to(device), targets.to(device)
+            targets = targets.float()  # ✅ float for BCE
             
             optimizer.zero_grad()
-            outputs = pruned_student(inputs)
+            outputs = pruned_student(inputs).squeeze(1)  # [B]
             loss = criterion(outputs, targets)
             loss.backward()
             optimizer.step()
             
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
+            preds = (outputs > 0).long()
             total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+            correct += preds.eq(targets.long()).sum().item()
         
         train_acc = 100. * correct / total
         
         # Evaluate
         pruned_student.eval()
-        test_loss = 0.0
         correct = 0
         total = 0
-        
         with torch.no_grad():
             for inputs, targets in test_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
-                outputs = pruned_student(inputs)
-                loss = criterion(outputs, targets)
-                
-                test_loss += loss.item()
-                _, predicted = outputs.max(1)
+                outputs = pruned_student(inputs).squeeze(1)
+                preds = (outputs > 0).long()
                 total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
+                correct += preds.eq(targets).sum().item()
         
         test_acc = 100. * correct / total
         
-        
         print(f"Epoch [{epoch+1}/{args.finetune_epochs}] "
-            f"Train: {train_acc:.2f}% | Test: {test_acc:.2f}%")
+              f"Train: {train_acc:.2f}% | Test: {test_acc:.2f}%")
         
         if test_acc > best_acc:
             best_acc = test_acc
@@ -282,7 +253,6 @@ def main():
         
         scheduler.step()
     
-    # Final Results
     print("\n" + "="*70)
     print("FINAL RESULTS")
     print("="*70)
@@ -291,7 +261,6 @@ def main():
     print(f"Parameters Reduction: {params_red:.2f}%")
     print(f"FLOPs Reduction: {flops_red:.2f}%")
     print("="*70 + "\n")
-
 
 if __name__ == '__main__':
     main()
