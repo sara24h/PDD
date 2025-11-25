@@ -37,9 +37,8 @@ class PDDTrainer:
         masks = {}
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # ✅ Better initialization: start near -0.1 so ApproxSign ≈ 1
                 mask = nn.Parameter(
-                    torch.full((1, module.out_channels, 1, 1), -0.1, device=self.device),
+                    torch.full((1, module.out_channels, 1, 1), -0.5, device=self.device),
                     requires_grad=True
                 )
                 masks[name] = mask
