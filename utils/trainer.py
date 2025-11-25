@@ -1,5 +1,3 @@
-# utils/trainer.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,13 +24,11 @@ class PDDTrainer:
             ],
             momentum=args.momentum
         )
-        
-        # Scheduler
+
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
             self.optimizer, milestones=args.lr_decay_epochs, gamma=args.lr_decay_rate
         )
-        
-        # Loss functions
+
         self.criterion = nn.CrossEntropyLoss()
         self.kd_criterion = nn.KLDivLoss(reduction='batchmean')
         
@@ -45,11 +41,7 @@ class PDDTrainer:
         
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                # Random init as per paper (std ~1.0)
-                mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device),
-                    requires_grad=True
-                )
+                mask = nn.Parameter(torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.00001, requires_grad=True)
                 masks[name] = mask
         
         return masks
@@ -62,8 +54,7 @@ class PDDTrainer:
                                                    torch.ones_like(x))))
 
     def _forward_with_masks(self, x):
-        """Forward pass with dynamic masking"""
-        # Conv1
+     
         out = self.student.conv1(x)
         if 'conv1' in self.masks:
             mask = self._approx_sign(self.masks['conv1'])
@@ -104,8 +95,7 @@ class PDDTrainer:
                 
                 out += identity
                 out = F.relu(out)
-        
-        # Global average pooling
+
         out = F.avg_pool2d(out, out.size()[3])
         out = out.view(out.size(0), -1)
         out = self.student.fc(out)
