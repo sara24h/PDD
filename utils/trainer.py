@@ -49,7 +49,7 @@ class PDDTrainer:
                 mask = nn.Parameter(
                     torch.randn(1, module.out_channels, 1, 1, device=self.device),
                     requires_grad=True
-                )*0.00001
+                )
                 masks[name] = mask
         
         return masks
@@ -145,7 +145,7 @@ class PDDTrainer:
                 # Teacher outputs
                 with torch.no_grad():
                     teacher_outputs = self.teacher(inputs)
-                    # ✅ اصلاح بحرانی: خروجی معلم (1 کلاسه) با دانش‌آموز (2 کلاسه) تطبیق داده می‌شود
+     
                     if teacher_outputs.shape[1] == 1 and student_outputs.shape[1] == 2:
                         
                         teacher_outputs = teacher_outputs.squeeze(1)
