@@ -72,7 +72,8 @@ def parse_args():
     parser.add_argument('--lr_decay_rate', type=float, default=0.1)
     
     # Distillation
-    parser.add_argument('--alpha', type=float, default=0.9)  # KD weight (CE weight = 1-alpha)
+    parser.add_argument('--alpha', type=float, default=0.9) 
+    parser.add_argument('--temperature', '--T', default=4.0, type=float, help='دما برای Knowledge Distillation')# KD weight (CE weight = 1-alpha)
     
     # Fine-tuning
     parser.add_argument('--finetune_epochs', type=int, default=100)
