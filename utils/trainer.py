@@ -33,11 +33,8 @@ class PDDTrainer:
             self.optimizer, milestones=args.lr_decay_epochs, gamma=args.lr_decay_rate
         )
         
-        # Loss functions
-        # تغییر ۱: استفاده از BCEWithLogitsLoss برای دسته‌بندی دودویی
         self.criterion = nn.BCEWithLogitsLoss()
-        # دیگر نیازی به kd_criterion نیست، چون به صورت سفارشی پیاده‌سازی می‌شود.
-        
+
         self.best_acc = 0.0
         self.best_masks = None
 
@@ -48,7 +45,7 @@ class PDDTrainer:
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) -2,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) -1.5,
                     requires_grad=True
                 )
                 masks[name] = mask
