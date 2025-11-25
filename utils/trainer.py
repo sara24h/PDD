@@ -23,7 +23,7 @@ class PDDTrainer:
         self.optimizer = torch.optim.SGD(
             [
                 {'params': self.student.parameters(), 'lr': args.lr, 'weight_decay': args.weight_decay},
-                {'params': mask_params, 'lr': args.lr * 10, 'weight_decay': 0.0}  # Higher LR, no decay
+                {'params': mask_params, 'lr': args.lr * 0.5, 'weight_decay': 0.0}  # Higher LR, no decay
             ],
             momentum=args.momentum
         )
