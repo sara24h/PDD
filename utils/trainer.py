@@ -40,14 +40,7 @@ class PDDTrainer:
         self.best_masks = None
 
     def _initialize_masks(self):
-        """
-        CRITICAL: Initialization strategy determines pruning behavior!
-        
-        Paper strategy (inferred from results):
-        - Random initialization allows natural evolution
-        - Some masks will drift negative (pruned)
-        - Others stay positive (kept)
-        """
+      
         masks = {}
         
         for name, module in self.student.named_modules():
@@ -56,7 +49,7 @@ class PDDTrainer:
                 mask = nn.Parameter(
                     torch.randn(1, module.out_channels, 1, 1, device=self.device),
                     requires_grad=True
-                )
+                )*0.00001
                 masks[name] = mask
         
         return masks
