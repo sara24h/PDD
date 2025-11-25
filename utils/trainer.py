@@ -41,7 +41,7 @@ class PDDTrainer:
         
         for name, module in self.student.named_modules():
             if isinstance(module, nn.Conv2d):
-                mask = nn.Parameter(torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.00001, requires_grad=True)
+                mask = nn.Parameter(torch.randn(1, module.out_channels, 1, 1, device=self.device) * 0.0001, requires_grad=True)
                 masks[name] = mask
         
         return masks
