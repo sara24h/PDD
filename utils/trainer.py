@@ -3,22 +3,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import numpy as np
-from tqdm import tqdm
 import time
+from tqdm import tqdm
 
 class PDDTrainer:
     def __init__(self, student, teacher, train_loader, test_loader, device, args, rank, world_size):
         self.student = student
-        self.teacher = teacher
+        self.teacher = teacher.to(device)
         self.train_loader = train_loader
         self.test_loader = test_loader
         self.device = device
         self.args = args
         self.rank = rank
         self.world_size = world_size
-        self.is_main_process = (rank == 0)
+        self.is_main = (rank == 0)
+
+        # Initialize masks
         self.masks = self._initialize_masks()
-        
+
         mask_params = list(self.masks.values())
         
         self.optimizer = torch.optim.SGD(
@@ -34,19 +36,20 @@ class PDDTrainer:
         )
         
         self.criterion = nn.BCEWithLogitsLoss()
+
         self.best_acc = 0.0
         self.best_masks = None
 
     def _initialize_masks(self):
         masks = {}
         
-        # دسترسی به مدل اصلی از DDP wrapper
-        base_model = self.student.module if hasattr(self.student, 'module') else self.student
+        # Access the underlying module (unwrap DDP)
+        model = self.student.module if hasattr(self.student, 'module') else self.student
         
-        for name, module in base_model.named_modules():
+        for name, module in model.named_modules():
             if isinstance(module, nn.Conv2d):
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) - 1.1,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) - 1.2,
                     requires_grad=True
                 )
                 masks[name] = mask
@@ -54,27 +57,27 @@ class PDDTrainer:
         return masks
 
     def _approx_sign(self, x):
-        """ApproxSign function"""
+        """ApproxSign function from paper"""
         return torch.where(x < -1, torch.zeros_like(x),
-                          torch.where(x < 0, (x + 1)**2 / 2,
-                                    torch.where(x < 1, (2*x - x**2 + 1)/2, 
-                                               torch.ones_like(x))))
+                           torch.where(x < 0, (x + 1)**2 / 2,
+                                       torch.where(x < 1, (2*x - x**2 + 1)/2, 
+                                                   torch.ones_like(x))))
 
     def _forward_with_masks(self, x):
-        """Forward pass با اعمال ماسک‌ها"""
-        base_model = self.student.module if hasattr(self.student, 'module') else self.student
+        """Forward pass with masks applied"""
+        model = self.student.module if hasattr(self.student, 'module') else self.student
         
         # Conv1
-        out = base_model.conv1(x)
+        out = model.conv1(x)
         if 'conv1' in self.masks:
             mask = self._approx_sign(self.masks['conv1'])
             out = out * mask
-        out = base_model.bn1(out)
+        out = model.bn1(out)
         out = F.relu(out)
         
         # Process each stage
         for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
-            layer = getattr(base_model, layer_name)
+            layer = getattr(model, layer_name)
             for i, block in enumerate(layer):
                 identity = out
                 
@@ -95,7 +98,7 @@ class PDDTrainer:
                     out = out * mask
                 out = block.bn2(out)
                 
-                # Shortcut
+                # Shortcut connection
                 if block.downsample is not None:
                     identity = block.downsample(identity)
                     shortcut_mask_name = f'{layer_name}.{i}.downsample.0'
@@ -109,38 +112,42 @@ class PDDTrainer:
         # Global average pooling
         out = F.avg_pool2d(out, out.size()[3])
         out = out.view(out.size(0), -1)
-        out = base_model.fc(out)
+        out = model.fc(out)
         
         return out
 
     def train(self):
-        if self.is_main_process:
+        if self.is_main:
             print("\n" + "="*70)
-            print("Starting PDD Training with DDP")
+            print("Starting PDD Training - Binary Classification with BCE")
             print("="*70)
-            print(f"World Size (GPUs): {self.world_size}")
             print(f"Temperature: {self.args.temperature}")
             print(f"Alpha (KD weight): {self.args.alpha}")
             print(f"Learning Rate: {self.args.lr}")
+            print(f"Mask Learning Rate: {self.args.lr * 5.0} (5x higher)")
             print(f"Epochs: {self.args.epochs}")
+            print(f"LR Decay: {self.args.lr_decay_epochs}")
             print(f"Total Masks: {len(self.masks)}")
+            print(f"Training on {self.world_size} GPUs")
             print("="*70 + "\n")
         
+        start_time = time.time()
+        
         for epoch in range(self.args.epochs):
-            # تنظیم epoch برای sampler
-            self.train_loader.sampler.set_epoch(epoch)
+            epoch_start = time.time()
             
             self.student.train()
-            train_loss = 0.0
-            kd_loss_total = 0.0
-            ce_loss_total = 0.0
-            correct = 0
-            total = 0
+            self.train_loader.sampler.set_epoch(epoch)
             
-            # نوار پیشرفت فقط برای main process
-            if self.is_main_process:
+            train_loss = torch.tensor(0.0).to(self.device)
+            kd_loss_total = torch.tensor(0.0).to(self.device)
+            ce_loss_total = torch.tensor(0.0).to(self.device)
+            correct = torch.tensor(0.0).to(self.device)
+            total = torch.tensor(0.0).to(self.device)
+            
+            # Progress bar only on main process
+            if self.is_main:
                 pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.args.epochs}")
-                start_time = time.time()
             else:
                 pbar = self.train_loader
             
@@ -156,7 +163,7 @@ class PDDTrainer:
                 # Teacher outputs
                 with torch.no_grad():
                     teacher_logits = self.teacher(inputs)
-                
+
                 # Classification Loss
                 ce_loss = self.criterion(student_logits, targets)
                 
@@ -164,7 +171,7 @@ class PDDTrainer:
                 teacher_probs = torch.sigmoid(teacher_logits / self.args.temperature)
                 student_probs = torch.sigmoid(student_logits / self.args.temperature)
                 kd_loss = F.binary_cross_entropy(student_probs, teacher_probs, reduction='mean') * (self.args.temperature ** 2)
-                
+
                 total_loss = self.args.alpha * kd_loss + (1 - self.args.alpha) * ce_loss
                 
                 total_loss.backward()
@@ -175,78 +182,70 @@ class PDDTrainer:
                 
                 self.optimizer.step()
                 
-                train_loss += total_loss.item()
-                kd_loss_total += kd_loss.item()
-                ce_loss_total += ce_loss.item()
+                train_loss += total_loss
+                kd_loss_total += kd_loss
+                ce_loss_total += ce_loss
                 
-                # محاسبه accuracy
                 predicted = (student_logits > 0).float()
                 total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
+                correct += predicted.eq(targets).sum()
                 
-                # به‌روزرسانی نوار پیشرفت
-                if self.is_main_process:
-                    current_acc = 100. * correct / total
+                if self.is_main:
                     pbar.set_postfix({
                         'loss': f'{total_loss.item():.4f}',
-                        'acc': f'{current_acc:.2f}%',
                         'kd': f'{kd_loss.item():.4f}',
                         'ce': f'{ce_loss.item():.4f}'
                     })
             
-            # محاسبه میانگین‌های epoch
-            train_acc = 100. * correct / total
+            # Aggregate metrics across GPUs
+            dist.all_reduce(train_loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(kd_loss_total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(ce_loss_total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(correct, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total, op=dist.ReduceOp.SUM)
             
-            # همگام‌سازی metrics بین GPU ها
-            metrics = torch.tensor([train_loss, kd_loss_total, ce_loss_total, correct, total], 
-                                  device=self.device)
-            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-            
-            if self.is_main_process:
-                train_loss = metrics[0].item() / (len(self.train_loader) * self.world_size)
-                kd_loss_avg = metrics[1].item() / (len(self.train_loader) * self.world_size)
-                ce_loss_avg = metrics[2].item() / (len(self.train_loader) * self.world_size)
-                train_acc = 100. * metrics[3].item() / metrics[4].item()
-            
-            # ارزیابی
+            train_acc = 100. * correct.item() / total.item()
             test_acc = self.evaluate()
-            
             self.scheduler.step()
             
-            if self.is_main_process:
-                pruning_ratio = self._calculate_pruning_ratio()
-                elapsed = time.time() - start_time
-                
-                print(f"\n{'='*70}")
-                print(f"Epoch [{epoch+1}/{self.args.epochs}] - Time: {elapsed:.1f}s")
-                print(f"Train: Loss={train_loss:.4f}, Acc={train_acc:.2f}%")
+            pruning_ratio = self._calculate_pruning_ratio()
+            
+            epoch_time = time.time() - epoch_start
+            elapsed_time = time.time() - start_time
+            
+            if self.is_main:
+                print(f"\nEpoch [{epoch+1}/{self.args.epochs}]")
+                print(f"Train: Loss={train_loss.item()/len(self.train_loader):.4f}, Acc={train_acc:.2f}%")
                 print(f"Test: Acc={test_acc:.2f}%")
-                print(f"Losses: KD={kd_loss_avg:.4f}, CE={ce_loss_avg:.4f}")
+                print(f"Losses: KD={kd_loss_total.item()/len(self.train_loader):.4f}, "
+                      f"CE={ce_loss_total.item()/len(self.train_loader):.4f}")
                 print(f"Pruning Ratio: {pruning_ratio:.2f}%")
-                print(f"{'='*70}")
+                print(f"Time: {epoch_time:.1f}s | Elapsed: {elapsed_time/60:.1f}min")
                 
-                self._print_mask_stats()
-                
-                if test_acc > self.best_acc:
-                    self.best_acc = test_acc
-                    self.best_masks = {name: mask.clone().detach()
-                                     for name, mask in self.masks.items()}
+                if (epoch + 1) % 5 == 0 or epoch == 0:
+                    self._print_mask_stats()
+            
+            if test_acc > self.best_acc:
+                self.best_acc = test_acc
+                self.best_masks = {name: mask.clone().detach()
+                                  for name, mask in self.masks.items()}
+                if self.is_main and ((epoch + 1) % 5 == 0 or epoch == 0):
                     print(f"✓ New best accuracy: {test_acc:.2f}%")
         
-        # بازگرداندن بهترین ماسک‌ها
-        if self.is_main_process and self.best_masks is not None:
+        if self.best_masks is not None:
             for name in self.masks.keys():
                 self.masks[name].data = self.best_masks[name].data
         
-        if self.is_main_process:
+        if self.is_main:
             print("\n" + "="*70)
             print("Training Complete!")
             print(f"Best Accuracy: {self.best_acc:.2f}%")
             print(f"Final Pruning: {self._calculate_pruning_ratio():.2f}%")
+            print(f"Total Time: {(time.time() - start_time)/60:.1f} minutes")
             print("="*70 + "\n")
 
     def _print_mask_stats(self):
-        """نمایش آمار ماسک‌ها"""
+        """Print detailed mask statistics"""
         raw_means = []
         raw_mins = []
         raw_maxs = []
@@ -269,10 +268,10 @@ class PDDTrainer:
         print(f" Channels with score=0 (raw<-1): {np.sum(pruned_counts)}")
 
     def evaluate(self):
-        """ارزیابی مدل"""
+        """Evaluate model with masks"""
         self.student.eval()
-        correct = 0
-        total = 0
+        correct = torch.tensor(0.0).to(self.device)
+        total = torch.tensor(0.0).to(self.device)
         
         with torch.no_grad():
             for inputs, targets in self.test_loader:
@@ -284,17 +283,16 @@ class PDDTrainer:
                 targets = targets.float().unsqueeze(1)
                 
                 total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
+                correct += predicted.eq(targets).sum()
         
-        # همگام‌سازی نتایج بین GPU ها
-        metrics = torch.tensor([correct, total], device=self.device)
-        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        # Aggregate across GPUs
+        dist.all_reduce(correct, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total, op=dist.ReduceOp.SUM)
         
-        accuracy = 100. * metrics[0].item() / metrics[1].item()
-        return accuracy
+        return 100. * correct.item() / total.item()
 
     def _calculate_pruning_ratio(self):
-        """محاسبه نسبت هرس"""
+        """Calculate current pruning ratio"""
         total_channels = 0
         pruned_channels = 0
         
@@ -309,26 +307,25 @@ class PDDTrainer:
         return 100. * pruned_channels / total_channels
 
     def get_masks(self):
-        """تولید ماسک‌های باینری نهایی"""
+        """Generate final binary masks for pruning"""
         binary_masks = {}
         
-        if self.is_main_process:
-            print(f"\n🔍 Generating binary masks")
-            print()
+        if self.is_main:
+            print(f"\n🔍 Generating binary masks based on raw mask values\n")
         
         for name, mask in self.masks.items():
             raw_mask = mask.detach().squeeze()
             score = self._approx_sign(mask).detach().squeeze()
             binary_mask = (score > 0.0).float()
             binary_masks[name] = binary_mask
+
+            kept = binary_mask.sum().item()
+            total = binary_mask.numel()
+            score_min = score.min().item()
+            score_max = score.max().item()
+            score_mean = score.mean().item()
             
-            if self.is_main_process:
-                kept = binary_mask.sum().item()
-                total = binary_mask.numel()
-                score_min = score.min().item()
-                score_max = score.max().item()
-                score_mean = score.mean().item()
-                
+            if self.is_main:
                 print(f"{name:30s}: {int(kept):3d}/{int(total):3d} kept | "
                       f"Score: min={score_min:.3f}, mean={score_mean:.3f}, max={score_max:.3f}")
         
