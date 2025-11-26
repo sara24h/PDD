@@ -8,7 +8,7 @@ import argparse
 import os
 import time
 from tqdm import tqdm
-from utils.data_loader_face import Dataset_selector 
+from utils.data_loader_face import Dataset_selector
 from models.resnet import resnet18, resnet50
 from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
@@ -16,10 +16,16 @@ from utils.helpers import set_seed, save_checkpoint
 
 def setup(rank, world_size):
     """Initialize the distributed process group"""
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    os.environ['MASTER_ADDR'] = '127.0.0.1'  
+    os.environ['MASTER_PORT'] = '29500'      
+    dist.init_process_group(
+        backend="nccl",
+        init_method='tcp://127.0.0.1:29500',  
+        rank=rank,
+        world_size=world_size
+    )
     torch.cuda.set_device(rank)
+    print(f"Rank {rank} initialized successfully!")  
 
 def cleanup():
     """Clean up the distributed process group"""
