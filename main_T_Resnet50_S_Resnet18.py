@@ -6,6 +6,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import argparse
 import os
+import time
+from tqdm import tqdm
 from utils.data_loader_face import Dataset_selector 
 from models.resnet import resnet18, resnet50
 from utils.trainer import PDDTrainer
@@ -354,7 +356,7 @@ def main_worker(rank, args):
         dist.barrier()
     
     # Load teacher state on all processes
-    teacher.module.load_state_dict(_state_dict)
+    teacher.module.load_state_dict(teacher_state)
     teacher.eval()
     
     # Evaluate teacher (only on rank 0)
@@ -380,7 +382,17 @@ def main_worker(rank, args):
         print("="*70)
     
     trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args, rank=rank)
+    
+    # Track training time for distillation
+    if rank == 0:
+        distillation_start_time = time.time()
+    
     trainer.train()
+    
+    # Calculate and print distillation time
+    if rank == 0:
+        distillation_time = time.time() - distillation_start_time
+        print(f"\nDistillation completed in {distillation_time/60:.2f} minutes")
     
     # Save student with masks (only on rank 0)
     if rank == 0:
@@ -454,12 +466,24 @@ def main_worker(rank, args):
     criterion = nn.BCEWithLogitsLoss()
     best_acc = 0.0
     
+    # Track fine-tuning time
+    if rank == 0:
+        finetune_start_time = time.time()
+        total_epochs = args.finetune_epochs
+        epoch_progress = tqdm(range(total_epochs), desc="Fine-tuning Progress", position=0, leave=True)
+    
     for epoch in range(args.finetune_epochs):
         # Training
         pruned_student.train()
         train_loss = 0.0
         correct = 0
         total = 0
+        
+        # Track epoch time
+        if rank == 0:
+            epoch_start_time = time.time()
+            batch_progress = tqdm(train_loader, desc=f"Epoch {epoch+1}/{total_epochs}", 
+                                 leave=False, position=1)
         
         for inputs, targets in train_loader:
             inputs, targets = inputs.to(device), targets.to(device)
@@ -475,6 +499,16 @@ def main_worker(rank, args):
             preds = (outputs > 0).long()
             total += targets.size(0)
             correct += preds.eq(targets.long()).sum().item()
+            
+            # Update batch progress bar
+            if rank == 0:
+                batch_progress.set_postfix({
+                    'Loss': f'{loss.item():.4f}',
+                    'Acc': f'{100.*correct/total:.2f}%'
+                })
+        
+        if rank == 0:
+            batch_progress.close()
         
         train_acc = 100. * correct / total
         train_loss = train_loss / len(train_loader)
@@ -483,6 +517,10 @@ def main_worker(rank, args):
         pruned_student.eval()
         correct = 0
         total = 0
+        
+        if rank == 0:
+            eval_progress = tqdm(test_loader, desc="Evaluating", leave=False, position=2)
+        
         with torch.no_grad():
             for inputs, targets in test_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
@@ -490,15 +528,31 @@ def main_worker(rank, args):
                 preds = (outputs > 0).long()
                 total += targets.size(0)
                 correct += preds.eq(targets).sum().item()
+                
+                # Update evaluation progress bar
+                if rank == 0:
+                    eval_progress.set_postfix({
+                        'Acc': f'{100.*correct/total:.2f}%'
+                    })
+        
+        if rank == 0:
+            eval_progress.close()
         
         test_acc = 100. * correct / total
         
-        # Print progress (only on rank 0)
-        if rank == 0 and ((epoch + 1) % 10 == 0 or epoch == 0):
-            print(f"Epoch [{epoch+1:3d}/{args.finetune_epochs}] "
-                  f"Train Loss: {train_loss:.4f} | "
-                  f"Train Acc: {train_acc:.2f}% | "
-                  f"Test Acc: {test_acc:.2f}%")
+        # Calculate epoch time
+        if rank == 0:
+            epoch_time = time.time() - epoch_start_time
+            remaining_time = epoch_time * (total_epochs - epoch - 1)
+            
+            # Update epoch progress bar
+            epoch_progress.set_postfix({
+                'Train Loss': f'{train_loss:.4f}',
+                'Train Acc': f'{train_acc:.2f}%',
+                'Test Acc': f'{test_acc:.2f}%',
+                'Epoch Time': f'{epoch_time:.2f}s',
+                'ETA': f'{remaining_time/60:.1f}m'
+            })
         
         # Save best model (only on rank 0)
         if rank == 0 and test_acc > best_acc:
@@ -516,6 +570,11 @@ def main_worker(rank, args):
         
         scheduler.step()
     
+    if rank == 0:
+        epoch_progress.close()
+        finetune_time = time.time() - finetune_start_time
+        print(f"\nFine-tuning completed in {finetune_time/60:.2f} minutes")
+    
     # Final Results (only on rank 0)
     if rank == 0:
         print("\n" + "="*70)
@@ -527,6 +586,9 @@ def main_worker(rank, args):
         print(f"Pruned Student Best Accuracy after Fine-tuning: {best_acc:.2f}%")
         print(f"Parameters Reduction: {params_red:.2f}%")
         print(f"FLOPs Reduction: {flops_red:.2f}%")
+        print(f"Distillation Time: {distillation_time/60:.2f} minutes")
+        print(f"Fine-tuning Time: {finetune_time/60:.2f} minutes")
+        print(f"Total Training Time: {(distillation_time+finetune_time)/60:.2f} minutes")
         print("="*70 + "\n")
         
         # Save final summary
@@ -540,7 +602,10 @@ def main_worker(rank, args):
             'original_params': orig_params,
             'pruned_params': pruned_params,
             'original_flops': orig_flops,
-            'pruned_flops': pruned_flops
+            'pruned_flops': pruned_flops,
+            'distillation_time_minutes': distillation_time/60,
+            'finetune_time_minutes': finetune_time/60,
+            'total_time_minutes': (distillation_time+finetune_time)/60
         }
         
         import json
@@ -548,22 +613,19 @@ def main_worker(rank, args):
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=4)
         print(f"✓ Summary saved to {summary_path}\n")
-    
-    # Clean up DDP
+
     cleanup()
 
 
 def main():
     args = parse_args()
-    
-    # Launch distributed training
+
     if args.world_size > 1:
         mp.spawn(main_worker,
                  args=(args,),
                  nprocs=args.world_size,
                  join=True)
     else:
-        # Single GPU training
         main_worker(0, args)
 
 
