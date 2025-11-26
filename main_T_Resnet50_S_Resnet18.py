@@ -1,33 +1,16 @@
 import torch
 import torch.nn as nn
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 import argparse
 import os
 import time
 from tqdm import tqdm
-from utils.data_loader_face import Dataset_selector
+from utils.data_loader_face import Dataset_selector 
 from models.resnet import resnet18, resnet50
 from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
 
-def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
-    # ← این خط رو از nccl به gloo تغییر بده
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-    print(f"Rank {rank} initialized successfully!")  
-
-def cleanup():
-    """Clean up the distributed process group"""
-    dist.destroy_process_group()
-
 def load_teacher_model(teacher, checkpoint_path, device):
-    """Load teacher model with flexible key matching"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     if isinstance(checkpoint, dict):
@@ -42,13 +25,11 @@ def load_teacher_model(teacher, checkpoint_path, device):
     else:
         state_dict = checkpoint
     
-    # Clean up keys
     new_state_dict = {}
     for key, value in state_dict.items():
         new_key = key.replace('module.', '').replace('shortcut.', 'downsample.')
         new_state_dict[new_key] = value
     
-    # Check key compatibility
     model_keys = set(teacher.state_dict().keys())
     checkpoint_keys = set(new_state_dict.keys())
     
@@ -70,400 +51,206 @@ def load_teacher_model(teacher, checkpoint_path, device):
     
     return teacher
 
-
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='PDD for Binary Face Classification - Multi-Dataset Support'
-    )
+    parser = argparse.ArgumentParser(description='PDD for Binary Face Classification')
     
-    # ==========================================
     # Dataset Selection
-    # ==========================================
-    parser.add_argument(
-        '--dataset', 
-        type=str, 
-        choices=['rvf10k', '140k', '190k', '200k', '330k'],
-        default='rvf10k',
-        help='Choose dataset: rvf10k, 140k, 190k, 200k, or 330k'
-    )
+    parser.add_argument('--dataset_mode', type=str, default='rvf10k',
+                        choices=['rvf10k', '140k', '190k', '200k', '330k'],
+                        help='Select dataset: rvf10k, 140k, 190k, 200k, or 330k')
     
-    # ==========================================
-    # RVF10K Dataset Paths
-    # ==========================================
-    parser.add_argument('--rvf10k_train_csv', type=str, 
-                        default='/kaggle/input/rvf10k/train.csv')
-    parser.add_argument('--rvf10k_valid_csv', type=str, 
-                        default='/kaggle/input/rvf10k/valid.csv')
-    parser.add_argument('--rvf10k_root_dir', type=str, 
-                        default='/kaggle/input/rvf10k')
+    # RVF10K Dataset
+    parser.add_argument('--rvf10k_train_csv', type=str, default='/kaggle/input/rvf10k/train.csv')
+    parser.add_argument('--rvf10k_valid_csv', type=str, default='/kaggle/input/rvf10k/valid.csv')
+    parser.add_argument('--rvf10k_root_dir', type=str, default='/kaggle/input/rvf10k')
     
-    # ==========================================
-    # 140K Dataset Paths
-    # ==========================================
-    parser.add_argument('--realfake140k_train_csv', type=str,
-                        default='/kaggle/input/140k-real-and-fake-faces/train.csv')
-    parser.add_argument('--realfake140k_valid_csv', type=str,
-                        default='/kaggle/input/140k-real-and-fake-faces/valid.csv')
-    parser.add_argument('--realfake140k_test_csv', type=str,
-                        default='/kaggle/input/140k-real-and-fake-faces/test.csv')
-    parser.add_argument('--realfake140k_root_dir', type=str,
-                        default='/kaggle/input/140k-real-and-fake-faces')
+    # 140K Dataset
+    parser.add_argument('--realfake140k_train_csv', type=str, default='/kaggle/input/140k-real-and-fake-faces/train.csv')
+    parser.add_argument('--realfake140k_valid_csv', type=str, default='/kaggle/input/140k-real-and-fake-faces/valid.csv')
+    parser.add_argument('--realfake140k_test_csv', type=str, default='/kaggle/input/140k-real-and-fake-faces/test.csv')
+    parser.add_argument('--realfake140k_root_dir', type=str, default='/kaggle/input/140k-real-and-fake-faces')
     
-    # ==========================================
-    # 190K Dataset Paths
-    # ==========================================
-    parser.add_argument('--realfake190k_root_dir', type=str,
-                        default='/kaggle/input/deepfake-and-real-images/Dataset')
+    # 190K Dataset
+    parser.add_argument('--realfake190k_root_dir', type=str, default='/kaggle/input/deepfake-and-real-images/Dataset')
     
-    # ==========================================
-    # 200K Dataset Paths
-    # ==========================================
-    parser.add_argument('--realfake200k_train_csv', type=str,
-                        default='/kaggle/input/200k-real-and-fake-faces/train_labels.csv')
-    parser.add_argument('--realfake200k_val_csv', type=str,
-                        default='/kaggle/input/200k-real-and-fake-faces/val_labels.csv')
-    parser.add_argument('--realfake200k_test_csv', type=str,
-                        default='/kaggle/input/200k-real-and-fake-faces/test_labels.csv')
-    parser.add_argument('--realfake200k_root_dir', type=str,
-                        default='/kaggle/input/200k-real-and-fake-faces')
+    # 200K Dataset
+    parser.add_argument('--realfake200k_train_csv', type=str, default='/kaggle/input/200k-real-and-fake-faces/train_labels.csv')
+    parser.add_argument('--realfake200k_val_csv', type=str, default='/kaggle/input/200k-real-and-fake-faces/val_labels.csv')
+    parser.add_argument('--realfake200k_test_csv', type=str, default='/kaggle/input/200k-real-and-fake-faces/test_labels.csv')
+    parser.add_argument('--realfake200k_root_dir', type=str, default='/kaggle/input/200k-real-and-fake-faces')
     
-    # ==========================================
-    # 330K Dataset Paths
-    # ==========================================
-    parser.add_argument('--realfake330k_root_dir', type=str,
-                        default='/kaggle/input/deepfake-dataset')
+    # 330K Dataset
+    parser.add_argument('--realfake330k_root_dir', type=str, default='/kaggle/input/deepfake-dataset')
     
-    # ==========================================
-    # Training Hyperparameters
-    # ==========================================
-    parser.add_argument('--batch_size', type=int, default=64,
-                        help='Batch size for training')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
+    # Data
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--num_workers', type=int, default=4)
     
-    # ==========================================
     # Model
-    # ==========================================
-    parser.add_argument('--teacher_checkpoint', type=str, required=True,
-                        help='Path to pretrained teacher model')
+    parser.add_argument('--teacher_checkpoint', type=str, 
+                        default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
     
-    # ==========================================
     # Training
-    # ==========================================
-    parser.add_argument('--epochs', type=int, default=50,
-                        help='Number of distillation epochs')
-    parser.add_argument('--lr', type=float, default=0.01,
-                        help='Initial learning rate')
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--weight_decay', type=float, default=0.005)
-    parser.add_argument('--lr_decay_epochs', type=int, nargs='+', default=[20, 40],
-                        help='Epochs to decay learning rate')
+    parser.add_argument('--lr_decay_epochs', type=list, default=[20, 40])
     parser.add_argument('--lr_decay_rate', type=float, default=0.1)
     
-    # ==========================================
     # Distillation
-    # ==========================================
-    parser.add_argument('--alpha', type=float, default=0.9,
-                        help='Weight for KD loss (CE weight = 1-alpha)')
-    parser.add_argument('--temperature', '-T', type=float, default=4.0,
-                        help='Temperature for Knowledge Distillation')
+    parser.add_argument('--alpha', type=float, default=0.9) 
+    parser.add_argument('--temperature', '--T', default=4.0, type=float, help='Temperature for KD')
     
-    # ==========================================
     # Fine-tuning
-    # ==========================================
-    parser.add_argument('--finetune_epochs', type=int, default=100,
-                        help='Number of fine-tuning epochs')
-    parser.add_argument('--finetune_lr', type=float, default=0.01,
-                        help='Learning rate for fine-tuning')
+    parser.add_argument('--finetune_epochs', type=int, default=100)
+    parser.add_argument('--finetune_lr', type=float, default=0.01)
     
-    # ==========================================
     # Other
-    # ==========================================
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--save_dir', type=str, default='/kaggle/working/pdd_checkpoints',
-                        help='Directory to save checkpoints')
-    parser.add_argument('--device', type=str, default='cuda',
-                        choices=['cuda', 'cpu'])
-    
-    # DDP parameters
-    parser.add_argument('--world_size', type=int, default=torch.cuda.device_count(),
-                        help='Number of processes for DDP')
-    parser.add_argument('--local_rank', type=int, default=0,
-                        help='Local rank for distributed training')
+    parser.add_argument('--save_dir', type=str, default='/kaggle/working/pdd_checkpoints')
+    parser.add_argument('--device', type=str, default='cuda')
     
     return parser.parse_args()
 
-
-def load_dataset(args, rank):
-    """Load dataset based on args.dataset with DistributedSampler"""
+def main():
+    args = parse_args()
+    set_seed(args.seed)
     
-    print(f"\n{'='*70}")
-    print(f"Loading Dataset: {args.dataset.upper()}")
-    print(f"{'='*70}")
+    os.makedirs(args.save_dir, exist_ok=True)
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     
-    # Create dataset selector without DDP parameters
-    if args.dataset == 'rvf10k':
-        dataset_selector = Dataset_selector(
-            dataset_mode='rvf10k',
-            rvf10k_train_csv=args.rvf10k_train_csv,
-            rvf10k_valid_csv=args.rvf10k_valid_csv,
-            rvf10k_root_dir=args.rvf10k_root_dir,
-            train_batch_size=args.batch_size,
-            eval_batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            ddp=False  # Disable DDP in the selector
-        )
-    
-    elif args.dataset == '140k':
-        dataset_selector = Dataset_selector(
-            dataset_mode='140k',
-            realfake140k_train_csv=args.realfake140k_train_csv,
-            realfake140k_valid_csv=args.realfake140k_valid_csv,
-            realfake140k_test_csv=args.realfake140k_test_csv,
-            realfake140k_root_dir=args.realfake140k_root_dir,
-            train_batch_size=args.batch_size,
-            eval_batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            ddp=False  # Disable DDP in the selector
-        )
-    
-    elif args.dataset == '190k':
-        dataset_selector = Dataset_selector(
-            dataset_mode='190k',
-            realfake190k_root_dir=args.realfake190k_root_dir,
-            train_batch_size=args.batch_size,
-            eval_batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            ddp=False  # Disable DDP in the selector
-        )
-    
-    elif args.dataset == '200k':
-        dataset_selector = Dataset_selector(
-            dataset_mode='200k',
-            realfake200k_train_csv=args.realfake200k_train_csv,
-            realfake200k_val_csv=args.realfake200k_val_csv,
-            realfake200k_test_csv=args.realfake200k_test_csv,
-            realfake200k_root_dir=args.realfake200k_root_dir,
-            train_batch_size=args.batch_size,
-            eval_batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            ddp=True
-        )
-    
-    elif args.dataset == '330k':
-        dataset_selector = Dataset_selector(
-            dataset_mode='330k',
-            realfake330k_root_dir=args.realfake330k_root_dir,
-            train_batch_size=args.batch_size,
-            eval_batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            ddp=False  # Disable DDP in the selector
-        )
-    
-    else:
-        raise ValueError(f"Unknown dataset: {args.dataset}")
-    
-    # Create distributed samplers
-    train_sampler = DistributedSampler(dataset_selector.train_dataset)
-    test_sampler = DistributedSampler(dataset_selector.test_dataset)
-    
-    # Create data loaders with distributed samplers
-    train_loader = torch.utils.data.DataLoader(
-        dataset_selector.train_dataset,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
-    
-    test_loader = torch.utils.data.DataLoader(
-        dataset_selector.test_dataset,
-        batch_size=args.batch_size,
-        sampler=test_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
-    
-    print(f"✓ Dataset loaded successfully\n")
-    
-    return train_loader, test_loader
-
-
-def main_worker(rank, args):
-    # Setup DDP
-    setup(rank, args.world_size)
-    
-    # Set seed
-    set_seed(args.seed + rank)
-    
-    # Create save directory
-    if rank == 0:
-        os.makedirs(args.save_dir, exist_ok=True)
-    
-    device = torch.device(f'cuda:{rank}')
-    
-    # Binary classification: 1 output
     NUM_CLASSES = 1
     
-    # Print configuration (only on rank 0)
-    if rank == 0:
-        print("\n" + "="*70)
-        print("PDD: Pruning During Distillation")
-        print("="*70)
-        print(f"Device: {device}")
-        print(f"Dataset: {args.dataset.upper()}")
-        print(f"Task: Binary Face Classification (Real vs Fake)")
-        print(f"Student Model: ResNet18 (1 output)")
-        print(f"Teacher Model: ResNet50 (1 output)")
-        print(f"Batch Size: {args.batch_size}")
-        print(f"Distillation Epochs: {args.epochs}")
-        print(f"Fine-tuning Epochs: {args.finetune_epochs}")
-        print(f"Temperature: {args.temperature}")
-        print(f"Alpha (KD weight): {args.alpha}")
-        print(f"World Size: {args.world_size}")
-        print("="*70)
+    print(f"Device: {device}")
+    print(f"Dataset: {args.dataset_mode}")
+    print(f"Task: Binary Face Classification")
+    print(f"Student Model: ResNet18 (1 output)")
+    print(f"Teacher Model: ResNet50 (1 output)")
     
-    # Load data
-    train_loader, test_loader = load_dataset(args, rank)
+    # Load data based on dataset_mode
+    print(f"\nLoading {args.dataset_mode} Dataset...")
+    
+    dataset_params = {
+        'dataset_mode': args.dataset_mode,
+        'train_batch_size': args.batch_size,
+        'eval_batch_size': args.batch_size,
+        'num_workers': args.num_workers,
+        'ddp': False
+    }
+    
+    if args.dataset_mode == 'rvf10k':
+        dataset_params.update({
+            'rvf10k_train_csv': args.rvf10k_train_csv,
+            'rvf10k_valid_csv': args.rvf10k_valid_csv,
+            'rvf10k_root_dir': args.rvf10k_root_dir
+        })
+    elif args.dataset_mode == '140k':
+        dataset_params.update({
+            'realfake140k_train_csv': args.realfake140k_train_csv,
+            'realfake140k_valid_csv': args.realfake140k_valid_csv,
+            'realfake140k_test_csv': args.realfake140k_test_csv,
+            'realfake140k_root_dir': args.realfake140k_root_dir
+        })
+    elif args.dataset_mode == '190k':
+        dataset_params.update({
+            'realfake190k_root_dir': args.realfake190k_root_dir
+        })
+    elif args.dataset_mode == '200k':
+        dataset_params.update({
+            'realfake200k_train_csv': args.realfake200k_train_csv,
+            'realfake200k_val_csv': args.realfake200k_val_csv,
+            'realfake200k_test_csv': args.realfake200k_test_csv,
+            'realfake200k_root_dir': args.realfake200k_root_dir
+        })
+    elif args.dataset_mode == '330k':
+        dataset_params.update({
+            'realfake330k_root_dir': args.realfake330k_root_dir
+        })
+    
+    dataset_selector = Dataset_selector(**dataset_params)
+    train_loader = dataset_selector.loader_train
+    test_loader = dataset_selector.loader_test
     
     # Create models
-    print(f"\n[Rank {rank}] Creating models...")
+    print("\nCreating models...")
     student = resnet18(num_classes=NUM_CLASSES).to(device)
     teacher = resnet50(num_classes=NUM_CLASSES).to(device)
     
-    # Wrap models with DDP
-    student = DDP(student, device_ids=[rank])
-    teacher = DDP(teacher, device_ids=[rank])
+    print(f"Student (ResNet18) parameters: {sum(p.numel() for p in student.parameters()):,}")
+    print(f"Teacher (ResNet50) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
     
-    if rank == 0:
-        print(f"Student (ResNet18) parameters: {sum(p.numel() for p in student.parameters()):,}")
-        print(f"Teacher (ResNet50) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
-    
-    # Load teacher (only on rank 0, then broadcast)
-    if rank == 0:
-        print("\nLoading teacher model...")
-        if not os.path.exists(args.teacher_checkpoint):
-            print(f"✗ ERROR: Teacher checkpoint not found at {args.teacher_checkpoint}")
-            cleanup()
-            return
+    # Load teacher
+    print("\nLoading teacher model...")
+    if not os.path.exists(args.teacher_checkpoint):
+        print(f"✗ ERROR: Teacher checkpoint not found at {args.teacher_checkpoint}")
+        return
         
-        teacher_state = load_teacher_model(teacher.module, args.teacher_checkpoint, device).state_dict()
-    else:
-        teacher_state = None
-    
-    # Broadcast teacher state to all processes
-    if args.world_size > 1:
-        dist.barrier()
-    
-    if rank == 0:
-        # Save teacher state to a temporary file
-        temp_path = os.path.join(args.save_dir, 'temp_teacher.pth')
-        torch.save(teacher_state, temp_path)
-        dist.barrier()
-    else:
-        # Wait for rank 0 to save the file
-        dist.barrier()
-        # Load teacher state from the temporary file
-        temp_path = os.path.join(args.save_dir, 'temp_teacher.pth')
-        teacher_state = torch.load(temp_path, map_location=device)
-        dist.barrier()
-    
-    # Load teacher state on all processes
-    teacher.module.load_state_dict(teacher_state)
+    teacher = load_teacher_model(teacher, args.teacher_checkpoint, device)
     teacher.eval()
     
-    # Evaluate teacher (only on rank 0)
-    if rank == 0:
-        print("\nEvaluating teacher model...")
-        correct = 0
-        total = 0
-        with torch.no_grad():
-            for inputs, targets in test_loader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                outputs = teacher(inputs).squeeze(1)  # [B]
-                preds = (outputs > 0).long()
-                correct += preds.eq(targets).sum().item()
-                total += targets.size(0)
-        
-        teacher_acc = 100. * correct / total
-        print(f"Teacher (ResNet50) Test Accuracy: {teacher_acc:.2f}%")
+    # Evaluate teacher
+    print("\nEvaluating teacher model...")
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, targets in tqdm(test_loader, desc="Teacher Evaluation", leave=False):
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = teacher(inputs).squeeze(1)
+            preds = (outputs > 0).long()
+            correct += preds.eq(targets).sum().item()
+            total += targets.size(0)
     
-    # Phase 1: PDD (Pruning During Distillation)
-    if rank == 0:
-        print("\n" + "="*70)
-        print("PHASE 1: Pruning During Distillation")
-        print("="*70)
+    teacher_acc = 100. * correct / total
+    print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
     
-    trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args, rank=rank)
+    # Phase 1: PDD
+    print("\n" + "="*70)
+    print("PHASE 1: Pruning During Distillation (50 epochs)")
+    print("="*70)
     
-    # Track training time for distillation
-    if rank == 0:
-        distillation_start_time = time.time()
-    
+    start_time = time.time()
+    trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args)
     trainer.train()
+    phase1_time = time.time() - start_time
     
-    # Calculate and print distillation time
-    if rank == 0:
-        distillation_time = time.time() - distillation_start_time
-        print(f"\nDistillation completed in {distillation_time/60:.2f} minutes")
+    save_path = os.path.join(args.save_dir, f'student_resnet18_{args.dataset_mode}_with_masks.pth')
+    save_checkpoint({
+        'state_dict': student.state_dict(),
+        'masks': trainer.get_masks(),
+        'args': args
+    }, save_path)
+    print(f"✓ Saved to {save_path}")
+    print(f"⏱ Phase 1 Time: {phase1_time/60:.2f} minutes")
     
-    # Save student with masks (only on rank 0)
-    if rank == 0:
-        checkpoint_name = f'student_resnet18_{args.dataset}_with_masks.pth'
-        save_path = os.path.join(args.save_dir, checkpoint_name)
-        save_checkpoint({
-            'state_dict': student.module.state_dict(),
-            'masks': trainer.get_masks(),
-            'best_acc': trainer.best_acc,
-            'args': vars(args),
-            'dataset': args.dataset
-        }, save_path)
-        print(f"✓ Saved checkpoint to {save_path}")
+    # Phase 2: Prune
+    print("\n" + "="*70)
+    print("PHASE 2: Pruning Model")
+    print("="*70)
     
-    # Phase 2: Prune (only on rank 0)
-    if rank == 0:
-        print("\n" + "="*70)
-        print("PHASE 2: Pruning Model")
-        print("="*70)
-        
-        pruner = ModelPruner(student.module, trainer.get_masks())
-        pruned_student = pruner.prune()
-        
-        orig_params, pruned_params = pruner.get_params_count()
-        orig_flops, pruned_flops = pruner.get_flops_count()
-        
-        params_red = (1 - pruned_params / orig_params) * 100
-        flops_red = (1 - pruned_flops / orig_flops) * 100
-        
-        print(f"\n{'='*70}")
-        print("Compression Statistics:")
-        print(f"{'='*70}")
-        print(f"Parameters: {orig_params:,} → {pruned_params:,} ({params_red:.2f}% reduction)")
-        print(f"FLOPs: {orig_flops:,} → {pruned_flops:,} ({flops_red:.2f}% reduction)")
-        print(f"{'='*70}\n")
-        
-        # Save pruned model to a temporary file for all processes to load
-        temp_pruned_path = os.path.join(args.save_dir, 'temp_pruned.pth')
-        torch.save(pruned_student.state_dict(), temp_pruned_path)
+    start_time = time.time()
+    pruner = ModelPruner(student, trainer.get_masks())
+    pruned_student = pruner.prune()
+    phase2_time = time.time() - start_time
     
-    # Synchronize all processes
-    if args.world_size > 1:
-        dist.barrier()
+    orig_params, pruned_params = pruner.get_params_count()
+    orig_flops, pruned_flops = pruner.get_flops_count()
     
-    # Load pruned model on all processes
-    if rank != 0:
-        temp_pruned_path = os.path.join(args.save_dir, 'temp_pruned.pth')
-        pruned_student = resnet18(num_classes=NUM_CLASSES).to(device)
-        pruned_student.load_state_dict(torch.load(temp_pruned_path, map_location=device))
+    params_red = (1 - pruned_params / orig_params) * 100
+    flops_red = (1 - pruned_flops / orig_flops) * 100
     
-    # Wrap pruned model with DDP
-    pruned_student = DDP(pruned_student, device_ids=[rank])
+    print(f"\nCompression Results:")
+    print(f"Parameters: {orig_params:,} → {pruned_params:,} ({params_red:.2f}% reduction)")
+    print(f"FLOPs: {orig_flops:,} → {pruned_flops:,} ({flops_red:.2f}% reduction)")
+    print(f"⏱ Phase 2 Time: {phase2_time:.2f} seconds")
     
     # Phase 3: Fine-tune
-    if rank == 0:
-        print("\n" + "="*70)
-        print("PHASE 3: Fine-tuning Pruned Model")
-        print("="*70)
+    print("\n" + "="*70)
+    print("PHASE 3: Fine-tuning Pruned Model (100 epochs)")
+    print("="*70)
+    
+    start_time = time.time()
+    pruned_student = pruned_student.to(device)
     
     optimizer = torch.optim.SGD(
         pruned_student.parameters(),
@@ -479,26 +266,15 @@ def main_worker(rank, args):
     criterion = nn.BCEWithLogitsLoss()
     best_acc = 0.0
     
-    # Track fine-tuning time
-    if rank == 0:
-        finetune_start_time = time.time()
-        total_epochs = args.finetune_epochs
-        epoch_progress = tqdm(range(total_epochs), desc="Fine-tuning Progress", position=0, leave=True)
-    
     for epoch in range(args.finetune_epochs):
-        # Training
         pruned_student.train()
-        train_loss = 0.0
         correct = 0
         total = 0
+        train_loss = 0.0
         
-        # Track epoch time
-        if rank == 0:
-            epoch_start_time = time.time()
-            batch_progress = tqdm(train_loader, desc=f"Epoch {epoch+1}/{total_epochs}", 
-                                 leave=False, position=1)
-        
-        for inputs, targets in train_loader:
+        # Training with progress bar
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.finetune_epochs} [Train]", leave=False)
+        for inputs, targets in pbar:
             inputs, targets = inputs.to(device), targets.to(device)
             targets = targets.float()
             
@@ -508,139 +284,70 @@ def main_worker(rank, args):
             loss.backward()
             optimizer.step()
             
-            train_loss += loss.item()
             preds = (outputs > 0).long()
             total += targets.size(0)
             correct += preds.eq(targets.long()).sum().item()
+            train_loss += loss.item()
             
-            # Update batch progress bar
-            if rank == 0:
-                batch_progress.set_postfix({
-                    'Loss': f'{loss.item():.4f}',
-                    'Acc': f'{100.*correct/total:.2f}%'
-                })
-        
-        if rank == 0:
-            batch_progress.close()
+            # Update progress bar
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 
+                            'acc': f'{100.*correct/total:.2f}%'})
         
         train_acc = 100. * correct / total
-        train_loss = train_loss / len(train_loader)
+        avg_train_loss = train_loss / len(train_loader)
         
-        # Evaluation
+        # Evaluate with progress bar
         pruned_student.eval()
         correct = 0
         total = 0
-        
-        if rank == 0:
-            eval_progress = tqdm(test_loader, desc="Evaluating", leave=False, position=2)
-        
         with torch.no_grad():
-            for inputs, targets in test_loader:
+            pbar = tqdm(test_loader, desc=f"Epoch {epoch+1}/{args.finetune_epochs} [Test]", leave=False)
+            for inputs, targets in pbar:
                 inputs, targets = inputs.to(device), targets.to(device)
                 outputs = pruned_student(inputs).squeeze(1)
                 preds = (outputs > 0).long()
                 total += targets.size(0)
                 correct += preds.eq(targets).sum().item()
                 
-                # Update evaluation progress bar
-                if rank == 0:
-                    eval_progress.set_postfix({
-                        'Acc': f'{100.*correct/total:.2f}%'
-                    })
-        
-        if rank == 0:
-            eval_progress.close()
+                pbar.set_postfix({'acc': f'{100.*correct/total:.2f}%'})
         
         test_acc = 100. * correct / total
         
-        # Calculate epoch time
-        if rank == 0:
-            epoch_time = time.time() - epoch_start_time
-            remaining_time = epoch_time * (total_epochs - epoch - 1)
-            
-            # Update epoch progress bar
-            epoch_progress.set_postfix({
-                'Train Loss': f'{train_loss:.4f}',
-                'Train Acc': f'{train_acc:.2f}%',
-                'Test Acc': f'{test_acc:.2f}%',
-                'Epoch Time': f'{epoch_time:.2f}s',
-                'ETA': f'{remaining_time/60:.1f}m'
-            })
+        print(f"Epoch [{epoch+1}/{args.finetune_epochs}] "
+              f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
+              f"Test Acc: {test_acc:.2f}%")
         
-        # Save best model (only on rank 0)
-        if rank == 0 and test_acc > best_acc:
+        if test_acc > best_acc:
             best_acc = test_acc
-            best_checkpoint_name = f'pruned_resnet18_{args.dataset}_best.pth'
             save_checkpoint({
                 'epoch': epoch,
-                'state_dict': pruned_student.module.state_dict(),
+                'state_dict': pruned_student.state_dict(),
                 'accuracy': test_acc,
                 'params_reduction': params_red,
                 'flops_reduction': flops_red,
-                'args': vars(args),
-                'dataset': args.dataset
-            }, os.path.join(args.save_dir, best_checkpoint_name))
+                'args': args,
+                'dataset': args.dataset_mode
+            }, os.path.join(args.save_dir, f'pruned_resnet18_{args.dataset_mode}_best.pth'))
         
         scheduler.step()
     
-    if rank == 0:
-        epoch_progress.close()
-        finetune_time = time.time() - finetune_start_time
-        print(f"\nFine-tuning completed in {finetune_time/60:.2f} minutes")
+    phase3_time = time.time() - start_time
+    total_time = phase1_time + phase2_time + phase3_time
     
-    # Final Results (only on rank 0)
-    if rank == 0:
-        print("\n" + "="*70)
-        print("FINAL RESULTS")
-        print("="*70)
-        print(f"Dataset: {args.dataset.upper()}")
-        print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
-        print(f"Student (ResNet18) Best Accuracy after Distillation: {trainer.best_acc:.2f}%")
-        print(f"Pruned Student Best Accuracy after Fine-tuning: {best_acc:.2f}%")
-        print(f"Parameters Reduction: {params_red:.2f}%")
-        print(f"FLOPs Reduction: {flops_red:.2f}%")
-        print(f"Distillation Time: {distillation_time/60:.2f} minutes")
-        print(f"Fine-tuning Time: {finetune_time/60:.2f} minutes")
-        print(f"Total Training Time: {(distillation_time+finetune_time)/60:.2f} minutes")
-        print("="*70 + "\n")
-        
-        # Save final summary
-        summary = {
-            'dataset': args.dataset,
-            'teacher_acc': teacher_acc,
-            'student_after_distillation': trainer.best_acc,
-            'pruned_student_after_finetune': best_acc,
-            'params_reduction': params_red,
-            'flops_reduction': flops_red,
-            'original_params': orig_params,
-            'pruned_params': pruned_params,
-            'original_flops': orig_flops,
-            'pruned_flops': pruned_flops,
-            'distillation_time_minutes': distillation_time/60,
-            'finetune_time_minutes': finetune_time/60,
-            'total_time_minutes': (distillation_time+finetune_time)/60
-        }
-        
-        import json
-        summary_path = os.path.join(args.save_dir, f'summary_{args.dataset}.json')
-        with open(summary_path, 'w') as f:
-            json.dump(summary, f, indent=4)
-        print(f"✓ Summary saved to {summary_path}\n")
-
-    cleanup()
-
-
-def main():
-    args = parse_args()
-
-    if args.world_size > 1:
-        mp.spawn(main_worker,
-                 args=(args,),
-                 nprocs=args.world_size,
-                 join=True)
-    else:
-        main_worker(0, args)
-
+    print("\n" + "="*70)
+    print("FINAL RESULTS")
+    print("="*70)
+    print(f"Dataset: {args.dataset_mode}")
+    print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
+    print(f"Best Test Accuracy (Pruned ResNet18): {best_acc:.2f}%")
+    print(f"Parameters Reduction: {params_red:.2f}%")
+    print(f"FLOPs Reduction: {flops_red:.2f}%")
+    print(f"\n⏱ Training Time Breakdown:")
+    print(f"  Phase 1 (PDD): {phase1_time/60:.2f} minutes")
+    print(f"  Phase 2 (Pruning): {phase2_time:.2f} seconds")
+    print(f"  Phase 3 (Fine-tuning): {phase3_time/60:.2f} minutes")
+    print(f"  Total Time: {total_time/60:.2f} minutes ({total_time/3600:.2f} hours)")
+    print("="*70 + "\n")
 
 if __name__ == '__main__':
     main()
