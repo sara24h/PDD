@@ -15,15 +15,10 @@ from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
 
 def setup(rank, world_size):
-    """Initialize the distributed process group"""
-    os.environ['MASTER_ADDR'] = '127.0.0.1'  
-    os.environ['MASTER_PORT'] = '29500'      
-    dist.init_process_group(
-        backend="nccl",
-        init_method='tcp://127.0.0.1:29500',  
-        rank=rank,
-        world_size=world_size
-    )
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29500'
+    # ← این خط رو از nccl به gloo تغییر بده
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
     print(f"Rank {rank} initialized successfully!")  
 
