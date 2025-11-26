@@ -252,7 +252,7 @@ def load_dataset(args, rank):
             train_batch_size=args.batch_size,
             eval_batch_size=args.batch_size,
             num_workers=args.num_workers,
-            ddp=False  # Disable DDP in the selector
+            ddp=True
         )
     
     elif args.dataset == '330k':
