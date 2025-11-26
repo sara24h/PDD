@@ -200,6 +200,7 @@ def load_dataset(args, rank):
     print(f"Loading Dataset: {args.dataset.upper()}")
     print(f"{'='*70}")
     
+    # Create dataset selector without DDP parameters
     if args.dataset == 'rvf10k':
         dataset_selector = Dataset_selector(
             dataset_mode='rvf10k',
@@ -209,9 +210,7 @@ def load_dataset(args, rank):
             train_batch_size=args.batch_size,
             eval_batch_size=args.batch_size,
             num_workers=args.num_workers,
-            ddp=True,
-            rank=rank,
-            world_size=args.world_size
+            ddp=False  # Disable DDP in the selector
         )
     
     elif args.dataset == '140k':
@@ -224,9 +223,7 @@ def load_dataset(args, rank):
             train_batch_size=args.batch_size,
             eval_batch_size=args.batch_size,
             num_workers=args.num_workers,
-            ddp=True,
-            rank=rank,
-            world_size=args.world_size
+            ddp=False  # Disable DDP in the selector
         )
     
     elif args.dataset == '190k':
@@ -236,9 +233,7 @@ def load_dataset(args, rank):
             train_batch_size=args.batch_size,
             eval_batch_size=args.batch_size,
             num_workers=args.num_workers,
-            ddp=True,
-            rank=rank,
-            world_size=args.world_size
+            ddp=False  # Disable DDP in the selector
         )
     
     elif args.dataset == '200k':
@@ -251,9 +246,7 @@ def load_dataset(args, rank):
             train_batch_size=args.batch_size,
             eval_batch_size=args.batch_size,
             num_workers=args.num_workers,
-            ddp=True,
-            rank=rank,
-            world_size=args.world_size
+            ddp=False  # Disable DDP in the selector
         )
     
     elif args.dataset == '330k':
@@ -263,17 +256,36 @@ def load_dataset(args, rank):
             train_batch_size=args.batch_size,
             eval_batch_size=args.batch_size,
             num_workers=args.num_workers,
-            ddp=True,
-            rank=rank,
-            world_size=args.world_size
+            ddp=False  # Disable DDP in the selector
         )
     
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
     
+    # Create distributed samplers
+    train_sampler = DistributedSampler(dataset_selector.train_dataset)
+    test_sampler = DistributedSampler(dataset_selector.test_dataset)
+    
+    # Create data loaders with distributed samplers
+    train_loader = torch.utils.data.DataLoader(
+        dataset_selector.train_dataset,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        dataset_selector.test_dataset,
+        batch_size=args.batch_size,
+        sampler=test_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    
     print(f"✓ Dataset loaded successfully\n")
     
-    return dataset_selector.loader_train, dataset_selector.loader_test
+    return train_loader, test_loader
 
 
 def main_worker(rank, args):
