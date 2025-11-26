@@ -7,7 +7,7 @@ import argparse
 import os
 from utils.data_loader_face import Dataset_selector 
 from models.resnet import resnet18, resnet50
-from utils.trainer_ddp import PDDTrainer
+from utils.trainer import PDDTrainer
 from utils.pruner import ModelPruner
 from utils.helpers import set_seed, save_checkpoint
 
