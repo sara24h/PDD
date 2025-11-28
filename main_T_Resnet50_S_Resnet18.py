@@ -12,7 +12,6 @@ from tqdm import tqdm
 from utils.data_loader_face import Dataset_selector 
 from models.resnet import resnet18, resnet50
 from utils.trainer import PDDTrainer
-# از ModelPruner و finetune_model دیگر نیازی نیست در این اسکریپت نیست
 from utils.helpers import set_seed, save_checkpoint
 
 def setup_ddp(rank, world_size):
@@ -28,7 +27,8 @@ def cleanup_ddp():
 
 def load_teacher_model(teacher, checkpoint_path, device):
     # این تابع بدون تغییر باقی می‌ماند
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # --- تغییر: اضافه شدن weights_only=False ---
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     if isinstance(checkpoint, dict):
         if 'state_dict' in checkpoint:
@@ -271,8 +271,8 @@ def main_worker(rank, world_size, args):
     if args.resume_path and os.path.isfile(args.resume_path):
         if is_main:
             print(f"\nResuming training from checkpoint: {args.resume_path}")
-        # بارگذاری روی CPU برای جلوگیری از خطاهای CUDA memory
-        checkpoint = torch.load(args.resume_path, map_location='cpu')
+        # --- تغییر: اضافه شدن weights_only=False ---
+        checkpoint = torch.load(args.resume_path, map_location='cpu', weights_only=False)
         start_epoch = checkpoint['epoch'] + 1
         if is_main:
             print(f"Resuming from epoch {start_epoch}")
