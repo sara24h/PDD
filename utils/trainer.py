@@ -43,8 +43,10 @@ class PDDTrainer:
         self.best_acc = 0.0
         self.best_masks = None
 
+        # --- بخش جدید برای بارگذاری از چک‌پوینت ---
         if checkpoint:
             self._load_checkpoint(checkpoint)
+        # --- پایان بخش جدید ---
     
     def _load_checkpoint(self, checkpoint):
         """Loads the training state from a checkpoint dictionary."""
@@ -63,7 +65,8 @@ class PDDTrainer:
         # بارگذاری ماسک‌ها
         for name, mask in self.masks.items():
             if name in checkpoint['masks']:
-                mask.data = checkpoint['masks'][name].data
+                # --- تغییر کلیدی: اضافه شدن .to(self.device) ---
+                mask.data = checkpoint['masks'][name].data.to(self.device)
         
         # بارگذاری سایر اطلاعات
         self.best_acc = checkpoint.get('best_acc', 0.0)
