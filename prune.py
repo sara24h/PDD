@@ -1,7 +1,7 @@
 import torch
 import argparse
 import os
-from models.resnet import resnet20
+from models.resnet import resnet18
 from utils.pruner import ModelPruner
 from utils.helpers import save_checkpoint
 
@@ -43,7 +43,7 @@ def main():
     
     # Create student model
     print("\nCreating student model...")
-    student = resnet20(num_classes=10)
+    student = resnet18(num_classes=1)
     
     # Load state dict
     if 'state_dict' in checkpoint:
