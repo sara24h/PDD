@@ -1,13 +1,16 @@
+# utils/trainer.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import numpy as np
 import time
+import os
 from tqdm import tqdm
 
 class PDDTrainer:
-    def __init__(self, student, teacher, train_loader, test_loader, device, args, rank, world_size):
+    def __init__(self, student, teacher, train_loader, test_loader, device, args, rank, world_size, checkpoint=None):
         self.student = student
         self.teacher = teacher.to(device)
         self.train_loader = train_loader
@@ -39,6 +42,35 @@ class PDDTrainer:
 
         self.best_acc = 0.0
         self.best_masks = None
+
+        if checkpoint:
+            self._load_checkpoint(checkpoint)
+    
+    def _load_checkpoint(self, checkpoint):
+        """Loads the training state from a checkpoint dictionary."""
+        if self.is_main:
+            print("Loading training state from checkpoint...")
+        
+        # بارگذاری وضعیت مدل
+        self.student.load_state_dict(checkpoint['student_state_dict'])
+        
+        # بارگذاری وضعیت بهینه‌ساز
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # بارگذاری وضعیت زمان‌بنده
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # بارگذاری ماسک‌ها
+        for name, mask in self.masks.items():
+            if name in checkpoint['masks']:
+                mask.data = checkpoint['masks'][name].data
+        
+        # بارگذاری سایر اطلاعات
+        self.best_acc = checkpoint.get('best_acc', 0.0)
+        self.best_masks = checkpoint.get('best_masks', None)
+        
+        if self.is_main:
+            print("✓ Training state loaded successfully.")
 
     def _initialize_masks(self):
         masks = {}
@@ -116,7 +148,37 @@ class PDDTrainer:
         
         return out
 
-    def train(self):
+    def _save_checkpoint(self, epoch, is_best=False):
+        """Saves a checkpoint of the training state."""
+        state = {
+            'epoch': epoch,
+            'student_state_dict': self.student.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'masks': {name: mask.clone().detach() for name, mask in self.masks.items()},
+            'best_acc': self.best_acc,
+            'best_masks': self.best_masks,
+            'args': self.args
+        }
+        
+        # مسیر فایل چک‌پوینت
+        filename = os.path.join(self.args.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
+        torch.save(state, filename)
+        
+        if self.is_main:
+            print(f"✓ Checkpoint saved to {filename}")
+        
+        # اگر بهترین مدل بود، یک کپی با نام خاص ذخیره می‌شود
+        if is_best:
+            best_filename = os.path.join(self.args.checkpoint_dir, 'model_best.pth')
+            torch.save(state, best_filename)
+            if self.is_main:
+                print(f"✓ Best model checkpoint saved to {best_filename}")
+        
+        # اطمینان از همگام‌سازی تمام پردازش‌ها قبل از ادامه
+        dist.barrier()
+
+    def train(self, start_epoch=0):
         if self.is_main:
             print("\n" + "="*70)
             print("Starting PDD Training - Binary Classification with BCE")
@@ -133,7 +195,8 @@ class PDDTrainer:
         
         start_time = time.time()
         
-        for epoch in range(self.args.epochs):
+        # حلقه از start_epoch شروع می‌شود
+        for epoch in range(start_epoch, self.args.epochs):
             epoch_start = time.time()
             
             self.student.train()
@@ -225,12 +288,18 @@ class PDDTrainer:
                 if (epoch + 1) % 5 == 0 or epoch == 0:
                     self._print_mask_stats()
             
+            is_best = False
             if test_acc > self.best_acc:
                 self.best_acc = test_acc
                 self.best_masks = {name: mask.clone().detach()
                                   for name, mask in self.masks.items()}
-                if self.is_main and ((epoch + 1) % 5 == 0 or epoch == 0):
+                is_best = True
+                if self.is_main:
                     print(f"✓ New best accuracy: {test_acc:.2f}%")
+
+            # ذخیره چک‌پوینت بهترین مدل و دوره‌ای
+            if self.is_main:
+                self._save_checkpoint(epoch, is_best=is_best)
         
         if self.best_masks is not None:
             for name in self.masks.keys():
