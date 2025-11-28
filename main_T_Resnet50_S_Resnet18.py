@@ -1,4 +1,4 @@
-# train_pdd.py
+# main_T_Resnet50_S_Resnet18.py
 
 import torch
 import torch.nn as nn
@@ -133,8 +133,16 @@ def parse_args():
     
     # Other
     parser.add_argument('--seed', type=int, default=42)
-    # مسیر ذخیره چک‌پوینت PDD
-    parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth', help='Path to save the PDD checkpoint')
+    
+    # --- آرگومان‌های جدید برای ذخیره‌سازی و ادامه آموزش ---
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', 
+                        help='Directory to save periodic checkpoints')
+    parser.add_argument('--resume_path', type=str, default=None, 
+                        help='Path to a checkpoint to resume training from')
+    # --- پایان آرگومان‌های جدید ---
+    
+    # مسیر ذخیره چک‌پوینت نهایی PDD
+    parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth', help='Path to save the final PDD checkpoint')
     
     return parser.parse_args()
 
@@ -167,7 +175,8 @@ def main_worker(rank, world_size, args):
     is_main = (rank == 0)
     
     if is_main:
-        os.makedirs(os.path.dirname(args.pdd_checkpoint_path), exist_ok=True)
+        # ایجاد پوشه برای چک‌پوینت‌ها
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
         print(f"\n{'='*70}")
         print(f"PHASE 1: PDD Training on {world_size} GPUs with DDP")
         print(f"Dataset: {args.dataset}")
@@ -256,25 +265,39 @@ def main_worker(rank, world_size, args):
     if is_main:
         print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
     
+    # --- بخش جدید برای بارگذاری چک‌پوینت ---
+    checkpoint = None
+    start_epoch = 0
+    if args.resume_path and os.path.isfile(args.resume_path):
+        if is_main:
+            print(f"\nResuming training from checkpoint: {args.resume_path}")
+        # بارگذاری روی CPU برای جلوگیری از خطاهای CUDA memory
+        checkpoint = torch.load(args.resume_path, map_location='cpu')
+        start_epoch = checkpoint['epoch'] + 1
+        if is_main:
+            print(f"Resuming from epoch {start_epoch}")
+    # --- پایان بخش جدید ---
+
     # Phase 1: PDD Training
     if is_main:
         print("\n" + "="*70)
         print("PHASE 1: Pruning During Distillation")
         print("="*70)
     
-    trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args, rank, world_size)
-    trainer.train()
+    # پاس دادن چک‌پوینت به PDDTrainer
+    trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args, rank, world_size, checkpoint)
+    trainer.train(start_epoch) # پاس دادن اپاک شروع به متد ترین
     
-    # Save checkpoint (only rank 0)
+    # Save final checkpoint (only rank 0)
     if is_main:
-        print(f"\nSaving PDD checkpoint to {args.pdd_checkpoint_path}...")
+        print(f"\nSaving final PDD checkpoint to {args.pdd_checkpoint_path}...")
         save_checkpoint({
             'student_state_dict': student.module.state_dict(),
             'masks': trainer.get_masks(),
             'args': args,
             'teacher_acc': teacher_acc
         }, args.pdd_checkpoint_path)
-        print("✓ PDD training complete. Checkpoint saved.")
+        print("✓ PDD training complete. Final checkpoint saved.")
     
     dist.barrier()
     cleanup_ddp()
