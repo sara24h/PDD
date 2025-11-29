@@ -27,7 +27,8 @@ class PDDTrainer:
         self.optimizer = torch.optim.SGD(
             [
                 {'params': self.student.parameters(), 'lr': args.lr, 'weight_decay': args.weight_decay},
-                {'params': mask_params, 'lr': args.lr * 5, 'weight_decay': 0.0}
+                # به جای *5 بذار *2 یا *3
+                {'params': mask_params, 'lr': args.lr * 0.015, 'weight_decay': 0.0}   # یا حتی *2
             ],
             momentum=args.momentum
         )
@@ -75,18 +76,16 @@ class PDDTrainer:
 
     def _initialize_masks(self):
         masks = {}
-        
-        # Access the underlying module (unwrap DDP)
         model = self.student.module if hasattr(self.student, 'module') else self.student
-        
+    
         for name, module in model.named_modules():
             if isinstance(module, nn.Conv2d):
+            # این خط رو جایگزین کن — فقط همین!
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) - 1.2,
+                    torch.full((1, module.out_channels, 1, 1), 0.7, device=self.device),
                     requires_grad=True
                 )
                 masks[name] = mask
-        
         return masks
 
     def _approx_sign(self, x):
