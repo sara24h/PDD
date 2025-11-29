@@ -18,6 +18,7 @@ def setup_ddp(rank, world_size):
     """Initialize DDP environment"""
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
+    os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
