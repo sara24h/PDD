@@ -84,7 +84,7 @@ class PDDTrainer:
         for name, module in model.named_modules():
             if isinstance(module, nn.Conv2d):
                 mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) - 1,
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) ,
                     requires_grad=True
                 )
                 masks[name] = mask
