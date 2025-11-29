@@ -26,7 +26,7 @@ class PDDTrainer:
         
         self.optimizer = torch.optim.SGD(
             [
-                {'params': self.student.parameters(), 'lr': args.lr, 'weight_decay': args.weight_decay},
+                {'params': self.student.parameters(), 'lr': args.lr *2, 'weight_decay': args.weight_decay},
                 {'params': mask_params, 'lr': args.lr * 5, 'weight_decay': 0.0}
             ],
             momentum=args.momentum
@@ -75,10 +75,7 @@ class PDDTrainer:
         
         for name, module in model.named_modules():
             if isinstance(module, nn.Conv2d):
-                mask = nn.Parameter(
-                    torch.randn(1, module.out_channels, 1, 1, device=self.device) -1.2 ,
-                    requires_grad=True
-                )
+                mask = nn.Parameter(torch.full((1, module.out_channels, 1, 1), 0.7, device=self.device))
                 masks[name] = mask
         
         return masks
