@@ -26,7 +26,7 @@ class PDDTrainer:
         
         self.optimizer = torch.optim.SGD(
             [
-                {'params': self.student.parameters(), 'lr': args.lr *2, 'weight_decay': args.weight_decay},
+                {'params': self.student.parameters(), 'lr': args.lr, 'weight_decay': args.weight_decay},
                 {'params': mask_params, 'lr': args.lr * 5, 'weight_decay': 0.0}
             ],
             momentum=args.momentum
@@ -41,23 +41,29 @@ class PDDTrainer:
         self.best_acc = 0.0
         self.best_masks = None
 
+        # --- بخش جدید برای بارگذاری از چک‌پوینت ---
         if checkpoint:
             self._load_checkpoint(checkpoint)
+        # --- پایان بخش جدید ---
     
     def _load_checkpoint(self, checkpoint):
         """Loads the training state from a checkpoint dictionary."""
         if self.is_main:
             print("Loading training state from checkpoint...")
-
+        
+        # بارگذاری وضعیت مدل
         self.student.load_state_dict(checkpoint['student_state_dict'])
-
+        
+        # بارگذاری وضعیت بهینه‌ساز
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
+        
+        # بارگذاری وضعیت زمان‌بنده
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-   
+        
+        # بارگذاری ماسک‌ها
         for name, mask in self.masks.items():
             if name in checkpoint['masks']:
-   
+                # --- تغییر کلیدی: اضافه شدن .to(self.device) ---
                 mask.data = checkpoint['masks'][name].data.to(self.device)
         
         # بارگذاری سایر اطلاعات
@@ -75,7 +81,10 @@ class PDDTrainer:
         
         for name, module in model.named_modules():
             if isinstance(module, nn.Conv2d):
-                mask = nn.Parameter(torch.full((1, module.out_channels, 1, 1), 0.7, device=self.device))
+                mask = nn.Parameter(
+                    torch.randn(1, module.out_channels, 1, 1, device=self.device) - 1.2,
+                    requires_grad=True
+                )
                 masks[name] = mask
         
         return masks
