@@ -54,14 +54,11 @@ class PDDTrainer:
         
         # بارگذاری وضعیت مدل
         self.student.load_state_dict(checkpoint['student_state_dict'])
-        
-        # بارگذاری وضعیت بهینه‌ساز
+
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        # بارگذاری وضعیت زمان‌بنده
+
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        # بارگذاری ماسک‌ها
+
         for name, mask in self.masks.items():
             if name in checkpoint['masks']:
                 # --- تغییر کلیدی: اضافه شدن .to(self.device) ---
@@ -160,22 +157,19 @@ class PDDTrainer:
             'best_masks': self.best_masks,
             'args': self.args
         }
-        
-        # مسیر فایل چک‌پوینت
-        filename = os.path.join(self.args.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
+
+        filename = os.path.join(self.args.save_dir, f'checkpoint_epoch_{epoch}.pth')
         torch.save(state, filename)
         
         if self.is_main:
             print(f"✓ Checkpoint saved to {filename}")
         
-        # اگر بهترین مدل بود، یک کپی با نام خاص ذخیره می‌شود
         if is_best:
-            best_filename = os.path.join(self.args.checkpoint_dir, 'model_best.pth')
+            best_filename = os.path.join(self.args.save_dir, 'model_best.pth')
             torch.save(state, best_filename)
             if self.is_main:
                 print(f"✓ Best model checkpoint saved to {best_filename}")
         
-        # اطمینان از همگام‌سازی تمام پردازش‌ها قبل از ادامه
         dist.barrier()
 
     def train(self, start_epoch=0):
