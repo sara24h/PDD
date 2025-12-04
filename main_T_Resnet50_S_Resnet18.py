@@ -21,7 +21,7 @@ def setup_ddp(rank, world_size):
     
     # Critical NCCL settings for stability (especially on Kaggle)
     os.environ['NCCL_DEBUG'] = 'INFO'
-    os environ['NCCL_SOCKET_IFNAME'] = 'lo'
+    os.environ['NCCL_SOCKET_IFNAME'] = 'lo'
     os.environ['NCCL_IB_DISABLE'] = '1'
     os.environ['NCCL_P2P_DISABLE'] = '1'
     os.environ['NCCL_BLOCKING_WAIT'] = '1'
