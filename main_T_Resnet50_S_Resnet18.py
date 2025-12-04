@@ -15,14 +15,20 @@ from utils.trainer import PDDTrainer
 from utils.helpers import set_seed, save_checkpoint
 
 def setup_ddp(rank, world_size):
-    """Initialize DDP environment"""
-    os.environ['MASTER_ADDR'] = 'localhost'
+    """Initialize DDP environment (clean and consistent)"""
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '12355'
-    os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
-    os.environ["NCCL_IB_DISABLE"] = "1"
-    os.environ["NCCL_P2P_DISABLE"] = "1"
-    os.environ["NCCL_TIMEOUT"] = "1800000"
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    
+    # Critical NCCL settings for stability (especially on Kaggle)
+    os.environ['NCCL_DEBUG'] = 'INFO'
+    os environ['NCCL_SOCKET_IFNAME'] = 'lo'
+    os.environ['NCCL_IB_DISABLE'] = '1'
+    os.environ['NCCL_P2P_DISABLE'] = '1'
+    os.environ['NCCL_BLOCKING_WAIT'] = '1'
+    os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '0'  # Disable async error to avoid silent hangs
+    os.environ['NCCL_TIMEOUT'] = '1800000'  # 30 minutes
+
+    dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
 def cleanup_ddp():
