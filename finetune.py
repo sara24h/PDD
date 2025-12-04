@@ -217,7 +217,7 @@ def main_worker(rank, world_size, args):
     # Load checkpoint
     if is_main:
         print("\nLoading PDD checkpoint...")
-    checkpoint = torch.load(args.pdd_checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(args.pdd_checkpoint_path, map_location=device)
     
     # Recreate the student model and load its state
     student = resnet18(num_classes=NUM_CLASSES).to(device)
@@ -252,7 +252,8 @@ def main_worker(rank, world_size, args):
         flops_red = 0
     
     dist.barrier()
-
+    
+    # Phase 3: Fine-tuning with DDP
     if is_main:
         print("\n" + "="*70)
         print("PHASE 3: Fine-tuning Pruned Model")
