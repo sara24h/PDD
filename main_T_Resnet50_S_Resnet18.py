@@ -18,8 +18,7 @@ def setup_ddp(rank, world_size):
     """Initialize DDP environment"""
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    # --- اصلاح: استفاده از TORCH_NCCL_ASYNC_ERROR_HANDLING ---
-    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"  # ✅ به‌روز
     os.environ["NCCL_IB_DISABLE"] = "1"
     os.environ["NCCL_P2P_DISABLE"] = "1"
     os.environ["NCCL_TIMEOUT"] = "1800000"
@@ -77,7 +76,6 @@ def load_teacher_model(teacher, checkpoint_path, device):
 def parse_args():
     parser = argparse.ArgumentParser(description='Phase 1: PDD Training with DDP')
     
-    # Dataset selection
     parser.add_argument('--dataset', type=str, default='rvf10k',
                        choices=['rvf10k', '140k', '190k', '200k', '330k'],
                        help='Dataset to use')
@@ -113,37 +111,22 @@ def parse_args():
     
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=4)
-    
-    # Model
     parser.add_argument('--teacher_checkpoint', type=str, 
                         default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
-    
-    # Training (PDD)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--weight_decay', type=float, default=0.005)
-    # --- اصلاح: type=int و nargs='+'
+    # ✅ اصلاح حیاتی: type=int + nargs='+'
     parser.add_argument('--lr_decay_epochs', type=int, nargs='+', default=[20, 40])
     parser.add_argument('--lr_decay_rate', type=float, default=0.1)
-    
-    # Distillation
     parser.add_argument('--alpha', type=float, default=0.9)
     parser.add_argument('--temperature', '--T', default=4.0, type=float)
-    
-    # DDP
     parser.add_argument('--world_size', type=int, default=2, help='Number of GPUs')
-    
-    # Other
     parser.add_argument('--seed', type=int, default=42)
-    
-    # Checkpointing
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', 
-                        help='Directory to save periodic checkpoints')
-    parser.add_argument('--resume_path', type=str, default=None, 
-                        help='Path to a checkpoint to resume training from')
-    parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth', 
-                        help='Path to save the final PDD checkpoint')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
+    parser.add_argument('--resume_path', type=str, default=None)
+    parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth')
     
     return parser.parse_args()
 
@@ -151,7 +134,6 @@ def evaluate_model(model, test_loader, device, rank, world_size):
     model.eval()
     correct = torch.tensor(0.0).to(device)
     total = torch.tensor(0.0).to(device)
-    
     with torch.no_grad():
         for inputs, targets in test_loader:
             inputs, targets = inputs.to(device), targets.to(device)
@@ -159,15 +141,11 @@ def evaluate_model(model, test_loader, device, rank, world_size):
             preds = (outputs > 0).long()
             correct += preds.eq(targets).sum()
             total += targets.size(0)
-    
     dist.all_reduce(correct, op=dist.ReduceOp.SUM)
     dist.all_reduce(total, op=dist.ReduceOp.SUM)
-    
     return 100. * correct.item() / total.item()
 
 def main_worker(rank, world_size, args):
-    """Main training function for each process"""
-    
     setup_ddp(rank, world_size)
     set_seed(args.seed + rank)
     
@@ -232,7 +210,6 @@ def main_worker(rank, world_size, args):
     
     student = resnet18(num_classes=NUM_CLASSES).to(device)
     teacher = resnet50(num_classes=NUM_CLASSES).to(device)
-    
     student = DDP(student, device_ids=[rank])
     
     if is_main:
@@ -277,12 +254,13 @@ def main_worker(rank, world_size, args):
     trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args, rank, world_size, checkpoint)
     trainer.train(start_epoch)
     
-    # --- 🔑 اصلاح کلیدی: همگام‌سازی قبل و بعد از ذخیره‌سازی نهایی ---
-    dist.barrier()  # ⬅️ انتظار برای تمام شدن همه رنک‌ها از آموزش
-
+    # ✅ 🔑 کلید حل مشکل: get_masks() را در همه رنک‌ها فراخوانی کن
+    masks = trainer.get_masks()  # لاگ فقط در is_main چاپ می‌شود، اما همه رنک‌ها آن را اجرا می‌کنند
+    
+    dist.barrier()  # همگام‌سازی قبل از ذخیره‌سازی
+    
     if is_main:
         print(f"\nSaving final PDD checkpoint to {args.pdd_checkpoint_path}...")
-        masks = trainer.get_masks()
         save_checkpoint({
             'student_state_dict': student.module.state_dict(),
             'masks': masks,
@@ -291,7 +269,7 @@ def main_worker(rank, world_size, args):
         }, args.pdd_checkpoint_path)
         print("✓ PDD training complete. Final checkpoint saved.")
     
-    dist.barrier()  # ⬅️ اطمینان از اتمام ذخیره‌سازی قبل از cleanup
+    dist.barrier()  # همگام‌سازی قبل از cleanup
     cleanup_ddp()
 
 def main():
