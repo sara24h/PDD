@@ -18,7 +18,8 @@ def setup_ddp(rank, world_size):
     """Initialize DDP environment"""
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    # ✅ اصلاح: استفاده از TORCH_NCCL_ASYNC_ERROR_HANDLING
+    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
     os.environ["NCCL_IB_DISABLE"] = "1"
     os.environ["NCCL_P2P_DISABLE"] = "1"
     os.environ["NCCL_TIMEOUT"] = "1800000"
@@ -30,8 +31,6 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 def load_teacher_model(teacher, checkpoint_path, device):
-    # این تابع بدون تغییر باقی می‌ماند
-    # --- تغییر: اضافه شدن weights_only=False ---
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     if isinstance(checkpoint, dict):
@@ -78,12 +77,10 @@ def load_teacher_model(teacher, checkpoint_path, device):
 def parse_args():
     parser = argparse.ArgumentParser(description='Phase 1: PDD Training with DDP')
     
-    # Dataset selection
     parser.add_argument('--dataset', type=str, default='rvf10k',
                        choices=['rvf10k', '140k', '190k', '200k', '330k'],
                        help='Dataset to use')
     
-    # ... (تمام آرگومان‌های دیتاست مانند کد اصلی)
     # RVF10K paths
     parser.add_argument('--rvf10k_train_csv', type=str, default='/kaggle/input/rvf10k/train.csv')
     parser.add_argument('--rvf10k_valid_csv', type=str, default='/kaggle/input/rvf10k/valid.csv')
@@ -115,47 +112,29 @@ def parse_args():
     
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=4)
-    
-    # Model
     parser.add_argument('--teacher_checkpoint', type=str, 
                         default='/kaggle/input/10k_teacher_beaet/pytorch/default/1/10k-teacher_model_best.pth')
-    
-    # Training (PDD)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--weight_decay', type=float, default=0.005)
-    parser.add_argument('--lr_decay_epochs', type=list, default=[20, 40])
+    # ✅ اصلاح حیاتی: type=int + nargs='+'
+    parser.add_argument('--lr_decay_epochs', type=int, nargs='+', default=[20, 40])
     parser.add_argument('--lr_decay_rate', type=float, default=0.1)
-    
-    # Distillation
     parser.add_argument('--alpha', type=float, default=0.9)
     parser.add_argument('--temperature', '--T', default=4.0, type=float)
-    
-    # DDP
     parser.add_argument('--world_size', type=int, default=2, help='Number of GPUs')
-    
-    # Other
     parser.add_argument('--seed', type=int, default=42)
-    
-    # --- آرگومان‌های جدید برای ذخیره‌سازی و ادامه آموزش ---
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', 
-                        help='Directory to save periodic checkpoints')
-    parser.add_argument('--resume_path', type=str, default=None, 
-                        help='Path to a checkpoint to resume training from')
-    # --- پایان آرگومان‌های جدید ---
-    
-    # مسیر ذخیره چک‌پوینت نهایی PDD
-    parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth', help='Path to save the final PDD checkpoint')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
+    parser.add_argument('--resume_path', type=str, default=None)
+    parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth')
     
     return parser.parse_args()
 
 def evaluate_model(model, test_loader, device, rank, world_size):
-    # این تابع بدون تغییر باقی می‌ماند
     model.eval()
     correct = torch.tensor(0.0).to(device)
     total = torch.tensor(0.0).to(device)
-    
     with torch.no_grad():
         for inputs, targets in test_loader:
             inputs, targets = inputs.to(device), targets.to(device)
@@ -163,15 +142,11 @@ def evaluate_model(model, test_loader, device, rank, world_size):
             preds = (outputs > 0).long()
             correct += preds.eq(targets).sum()
             total += targets.size(0)
-    
     dist.all_reduce(correct, op=dist.ReduceOp.SUM)
     dist.all_reduce(total, op=dist.ReduceOp.SUM)
-    
     return 100. * correct.item() / total.item()
 
 def main_worker(rank, world_size, args):
-    """Main training function for each process"""
-    
     setup_ddp(rank, world_size)
     set_seed(args.seed + rank)
     
@@ -179,7 +154,6 @@ def main_worker(rank, world_size, args):
     is_main = (rank == 0)
     
     if is_main:
-        # ایجاد پوشه برای چک‌پوینت‌ها
         os.makedirs(args.checkpoint_dir, exist_ok=True)
         print(f"\n{'='*70}")
         print(f"PHASE 1: PDD Training on {world_size} GPUs with DDP")
@@ -188,7 +162,6 @@ def main_worker(rank, world_size, args):
     
     NUM_CLASSES = 1
     
-    # Load data with DDP
     if is_main:
         print(f"\nLoading {args.dataset} Dataset...")
     
@@ -200,7 +173,6 @@ def main_worker(rank, world_size, args):
         'ddp': True
     }
     
-    # Add dataset-specific paths (مانند کد اصلی)
     if args.dataset == 'rvf10k':
         dataset_kwargs.update({
             'rvf10k_train_csv': args.rvf10k_train_csv,
@@ -234,20 +206,17 @@ def main_worker(rank, world_size, args):
     train_loader = dataset_selector.loader_train
     test_loader = dataset_selector.loader_test
     
-    # Create models
     if is_main:
         print("\nCreating models...")
     
     student = resnet18(num_classes=NUM_CLASSES).to(device)
     teacher = resnet50(num_classes=NUM_CLASSES).to(device)
-    
     student = DDP(student, device_ids=[rank])
     
     if is_main:
         print(f"Student (ResNet18) parameters: {sum(p.numel() for p in student.parameters()):,}")
         print(f"Teacher (ResNet50) parameters: {sum(p.numel() for p in teacher.parameters()):,}")
     
-    # Load teacher
     if is_main:
         print("\nLoading teacher model...")
     
@@ -260,7 +229,6 @@ def main_worker(rank, world_size, args):
     teacher = load_teacher_model(teacher, args.teacher_checkpoint, device)
     teacher.eval()
     
-    # Evaluate teacher
     if is_main:
         print("\nEvaluating teacher model...")
     
@@ -269,35 +237,34 @@ def main_worker(rank, world_size, args):
     if is_main:
         print(f"Teacher (ResNet50) Accuracy: {teacher_acc:.2f}%")
     
-    # --- بخش جدید برای بارگذاری چک‌پوینت ---
     checkpoint = None
     start_epoch = 0
     if args.resume_path and os.path.isfile(args.resume_path):
         if is_main:
             print(f"\nResuming training from checkpoint: {args.resume_path}")
-        # --- تغییر: اضافه شدن weights_only=False ---
         checkpoint = torch.load(args.resume_path, map_location='cpu', weights_only=False)
         start_epoch = checkpoint['epoch'] + 1
         if is_main:
             print(f"Resuming from epoch {start_epoch}")
-    # --- پایان بخش جدید ---
-
-    # Phase 1: PDD Training
+    
     if is_main:
         print("\n" + "="*70)
         print("PHASE 1: Pruning During Distillation")
         print("="*70)
     
-    # پاس دادن چک‌پوینت به PDDTrainer
     trainer = PDDTrainer(student, teacher, train_loader, test_loader, device, args, rank, world_size, checkpoint)
-    trainer.train(start_epoch) # پاس دادن اپاک شروع به متد ترین
+    trainer.train(start_epoch)
     
-    # Save final checkpoint (only rank 0)
+    # ✅ ذخیره ماسک‌ها (فقط main چاپ می‌کند، اما همه اجرا می‌کنند)
+    masks = trainer.get_masks()
+    
+    dist.barrier()
+    
     if is_main:
         print(f"\nSaving final PDD checkpoint to {args.pdd_checkpoint_path}...")
         save_checkpoint({
             'student_state_dict': student.module.state_dict(),
-            'masks': trainer.get_masks(),
+            'masks': masks,
             'args': args,
             'teacher_acc': teacher_acc
         }, args.pdd_checkpoint_path)
@@ -305,6 +272,9 @@ def main_worker(rank, world_size, args):
     
     dist.barrier()
     cleanup_ddp()
+    
+    # 🔥 راه‌حل نهایی برای Kaggle: خاتمه فوری فرآیند
+    os._exit(0)
 
 def main():
     args = parse_args()
