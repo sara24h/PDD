@@ -131,9 +131,7 @@ def parse_args():
     # Fine-tuning
     parser.add_argument('--finetune_epochs', type=int, default=100)
     parser.add_argument('--finetune_lr', type=float, default=0.01)
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Directory to save periodic checkpoints') 
-    parser.add_argument('--resume_path', type=str, default=None, help='Path to a checkpoint to resume training from') # --- پایان آرگومان‌های جدید --- # مسیر ذخیره چک‌پوینت نهایی PDD 
-    parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth', help='Path to save the final PDD checkpoint')
+    
     # DDP
     parser.add_argument('--world_size', type=int, default=2, help='Number of GPUs')
     
