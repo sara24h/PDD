@@ -135,6 +135,8 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42)
     # مسیر ذخیره چک‌پوینت PDD
     parser.add_argument('--pdd_checkpoint_path', type=str, default='./pdd_checkpoint.pth', help='Path to save the PDD checkpoint')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
+                    help='Directory to save intermediate training checkpoints')
     
     return parser.parse_args()
 
@@ -167,7 +169,7 @@ def main_worker(rank, world_size, args):
     is_main = (rank == 0)
     
     if is_main:
-        os.makedirs(os.path.dirname(args.pdd_checkpoint_path), exist_ok=True)
+        os.makedirs(args.checkpoint_dir, exist_ok=True) 
         print(f"\n{'='*70}")
         print(f"PHASE 1: PDD Training on {world_size} GPUs with DDP")
         print(f"Dataset: {args.dataset}")
